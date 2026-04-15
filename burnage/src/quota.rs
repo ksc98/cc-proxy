@@ -27,6 +27,22 @@ const LIMIT_VEC_STORED_DIMS: f64 = 10_000_000.0;
 // https://developers.cloudflare.com/workers-ai/platform/pricing/
 const AI_NEURONS_PER_DAY: f64 = 10_000.0;
 
+// Overage pricing (USD per overage unit). These are used to estimate what
+// you'd pay if the current usage persisted for the full billing month —
+// they are "what if" projections against the displayed bars, not a
+// statement about what Cloudflare will actually charge (billing is
+// per-calendar-month, not per-query-window).
+const RATE_REQ_PER_M: f64 = 0.30;
+const RATE_CPU_PER_M_MS: f64 = 0.02;
+const RATE_DO_REQ_PER_M: f64 = 0.15;
+const RATE_DO_DURATION_PER_M_GBS: f64 = 12.50;
+const RATE_DO_ROWS_READ_PER_M: f64 = 0.001;
+const RATE_DO_ROWS_WRITTEN_PER_M: f64 = 1.0;
+const RATE_DO_STORAGE_PER_GB: f64 = 0.20;
+const RATE_VEC_QUERIED_PER_M: f64 = 0.01;
+const RATE_VEC_STORED_PER_100M: f64 = 0.05;
+const RATE_AI_PER_1K: f64 = 0.011;
+
 pub(crate) const BAR_WIDTH: usize = 24;
 // Per-Durable-Object SQLite storage hard cap (not the account-wide monthly
 // allocation). Used for the single-DO storage bar in `usage.rs`.
@@ -677,83 +693,139 @@ fn print_totals(
     let total_vec_stored: u64 = vec_s.iter().map(|v| v.stored_dims).sum();
     let total_ai_requests: u64 = ai.iter().map(|r| r.requests).sum();
     let total_ai_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
-    let ai_allocation: f64 = AI_NEURONS_PER_DAY * window_days;
+    // Workers AI resets at 00:00 UTC and does not pool across days, so the
+    // correct billable comparison is a per-day average against the 10k/day
+    // allocation — not window-total against window_days * 10k (that would
+    // hide a single-day overage under an under-used month).
+    let ai_daily_avg: f64 = if window_days > 0.0 {
+        total_ai_neurons / window_days
+    } else {
+        total_ai_neurons
+    };
 
     println!("{}", sty.header("ACCOUNT TOTALS"));
     println!(
         "{}",
-        sty.dim("  (monthly allocation included in Workers Paid plan)")
+        sty.dim(
+            "  (allocation included in Workers Paid plan; $ = projected overage if usage persists)"
+        )
     );
-    let items: Vec<(&str, String, String, f64)> = vec![
+    // Overage $ is a "what if usage persisted through end-of-month"
+    // projection for pooled metrics (requests, CPU, DO, Vectorize) and
+    // windowed daily-avg projection for AI neurons. Not an authoritative
+    // bill; the rates are from CF's public pricing pages.
+    fn overage(used: f64, limit: f64, rate_per_unit: f64) -> f64 {
+        ((used - limit).max(0.0)) * rate_per_unit
+    }
+    // AI overage uses the daily-avg model: per-day overage × days in window.
+    let ai_overage_usd = (ai_daily_avg - AI_NEURONS_PER_DAY).max(0.0)
+        * window_days
+        * RATE_AI_PER_1K
+        / 1_000.0;
+
+    let items: Vec<(&str, String, String, f64, f64)> = vec![
         (
             "requests",
             human_count(total_req),
             human_count(LIMIT_REQ as u64),
             total_req as f64 / LIMIT_REQ,
+            overage(total_req as f64, LIMIT_REQ, RATE_REQ_PER_M / 1e6),
         ),
         (
             "cpu time",
             human_ms(total_cpu_ms),
             human_ms(LIMIT_CPU_MS as u64),
             total_cpu_ms as f64 / LIMIT_CPU_MS,
+            overage(total_cpu_ms as f64, LIMIT_CPU_MS, RATE_CPU_PER_M_MS / 1e6),
         ),
         (
             "do requests",
             human_count(total_do_req),
             human_count(LIMIT_DO_REQ as u64),
             total_do_req as f64 / LIMIT_DO_REQ,
+            overage(total_do_req as f64, LIMIT_DO_REQ, RATE_DO_REQ_PER_M / 1e6),
         ),
         (
             "do duration",
             format!("{} GB-s", human_num(total_do_duration)),
             format!("{} GB-s", human_num(LIMIT_DO_DURATION_GB_S)),
             total_do_duration / LIMIT_DO_DURATION_GB_S,
+            overage(
+                total_do_duration,
+                LIMIT_DO_DURATION_GB_S,
+                RATE_DO_DURATION_PER_M_GBS / 1e6,
+            ),
         ),
         (
             "do rows read",
             human_count(total_do_rows_read),
             human_count(LIMIT_DO_ROWS_READ as u64),
             total_do_rows_read as f64 / LIMIT_DO_ROWS_READ,
+            overage(
+                total_do_rows_read as f64,
+                LIMIT_DO_ROWS_READ,
+                RATE_DO_ROWS_READ_PER_M / 1e6,
+            ),
         ),
         (
             "do rows written",
             human_count(total_do_rows_written),
             human_count(LIMIT_DO_ROWS_WRITTEN as u64),
             total_do_rows_written as f64 / LIMIT_DO_ROWS_WRITTEN,
+            overage(
+                total_do_rows_written as f64,
+                LIMIT_DO_ROWS_WRITTEN,
+                RATE_DO_ROWS_WRITTEN_PER_M / 1e6,
+            ),
         ),
         (
             "do storage",
             human_bytes(total_do_bytes),
             human_bytes(LIMIT_DO_BYTES as u64),
             total_do_bytes as f64 / LIMIT_DO_BYTES,
+            // DO storage is priced per GB-month; convert bytes over limit
+            // into decimal GB (Cloudflare's convention) and multiply by rate.
+            overage(
+                total_do_bytes as f64 / 1e9,
+                LIMIT_DO_BYTES / 1e9,
+                RATE_DO_STORAGE_PER_GB,
+            ),
         ),
         (
             "vec queried",
             human_count(total_vec_queried),
             human_count(LIMIT_VEC_QUERIED_DIMS as u64),
             total_vec_queried as f64 / LIMIT_VEC_QUERIED_DIMS,
+            overage(
+                total_vec_queried as f64,
+                LIMIT_VEC_QUERIED_DIMS,
+                RATE_VEC_QUERIED_PER_M / 1e6,
+            ),
         ),
         (
             "vec stored",
             human_count(total_vec_stored),
             human_count(LIMIT_VEC_STORED_DIMS as u64),
             total_vec_stored as f64 / LIMIT_VEC_STORED_DIMS,
+            overage(
+                total_vec_stored as f64,
+                LIMIT_VEC_STORED_DIMS,
+                RATE_VEC_STORED_PER_100M / 1e8,
+            ),
         ),
         (
-            "ai neurons",
-            human_num(total_ai_neurons),
-            human_num(ai_allocation),
-            if ai_allocation > 0.0 {
-                total_ai_neurons / ai_allocation
-            } else {
-                0.0
-            },
+            "ai neurons/day avg",
+            human_num(ai_daily_avg),
+            human_num(AI_NEURONS_PER_DAY),
+            ai_daily_avg / AI_NEURONS_PER_DAY,
+            ai_overage_usd,
         ),
         (
             "build mins",
             format!("{build_min:.1}"),
             format!("{}", LIMIT_BUILD_MIN as u64),
             build_min / LIMIT_BUILD_MIN,
+            0.0, // build minutes overage not included here
         ),
     ];
 
@@ -764,19 +836,25 @@ fn print_totals(
         .max()
         .unwrap_or(0);
 
-    for (label, used, limit, frac) in &items {
+    for (label, used, limit, frac, overage_usd) in &items {
         let used_limit = format!("{used} / {limit}");
-        let pad_label = " ".repeat(label_w - label.len());
+        let pad_label = " ".repeat(label_w.saturating_sub(label.len()));
         let pad_val = " ".repeat(val_w.saturating_sub(used_limit.chars().count()));
         let pct_str = format_pct(*frac);
+        let overage_cell = if *overage_usd > 0.0 {
+            sty.bold_color(&fmt_usd(*overage_usd), "31")
+        } else {
+            sty.dim("—")
+        };
         println!(
-            "  {}{}  {}{}  {}  {}",
+            "  {}{}  {}{}  {}  {}  {}",
             label,
             pad_label,
             used_limit,
             pad_val,
             bar(sty, *frac, BAR_WIDTH),
             sty.bold_color(&pct_str, frac_color(*frac)),
+            overage_cell,
         );
     }
 
@@ -826,9 +904,10 @@ fn print_totals(
             },
         ),
         ("ai requests", sty.dim(&human_count(total_ai_requests))),
+        ("ai neurons total", sty.dim(&human_num(total_ai_neurons))),
     ];
     for (label, val) in &info_rows {
-        let pad = " ".repeat(label_w - label.len());
+        let pad = " ".repeat(label_w.saturating_sub(label.len()));
         println!("  {}{}  {}", label, pad, val);
     }
 }
@@ -1220,6 +1299,18 @@ pub(crate) fn human_bytes(n: u64) -> String {
         i += 1;
     }
     format!("{:.1} {}", f, units[i])
+}
+
+pub(crate) fn fmt_usd(amount: f64) -> String {
+    if amount >= 1000.0 {
+        format!("${amount:.0}")
+    } else if amount >= 10.0 {
+        format!("${amount:.2}")
+    } else if amount >= 0.01 {
+        format!("${amount:.3}")
+    } else {
+        format!("${amount:.4}")
+    }
 }
 
 pub(crate) fn format_pct(frac: f64) -> String {
