@@ -51,6 +51,7 @@ import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
+import { TurnDetail } from "@/components/TurnDetail";
 
 type LeafRow = {
   kind: "leaf";
@@ -491,6 +492,10 @@ export default function RecentTurnsTable({
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>({});
   const [shownMap, setShownMap] = React.useState<Record<string, number>>({});
+  const [expandedLeaves, setExpandedLeaves] = React.useState<Record<string, boolean>>({});
+  const toggleLeaf = React.useCallback((txId: string) => {
+    setExpandedLeaves((p) => ({ ...p, [txId]: !p[txId] }));
+  }, []);
   const shownFor = React.useCallback(
     (id: string) => shownMap[id] ?? HIDDEN_PER_GROUP,
     [shownMap],
@@ -827,8 +832,14 @@ export default function RecentTurnsTable({
                 const total = groupSizes.get(pid) ?? 0;
                 const limit = shownFor(pid);
                 if (nShown <= limit) {
+                  const leafTx = (row.original as LeafRow).tx;
+                  const isLeafOpen = !!expandedLeaves[leafTx.tx_id];
                   out.push(
-                    <TableRow key={row.id}>
+                    <TableRow
+                      key={row.id}
+                      className="cursor-pointer"
+                      onClick={() => toggleLeaf(leafTx.tx_id)}
+                    >
                       {row.getVisibleCells().map((cell) => (
                         <TableCell
                           key={cell.id}
@@ -846,6 +857,21 @@ export default function RecentTurnsTable({
                       ))}
                     </TableRow>,
                   );
+                  if (isLeafOpen) {
+                    out.push(
+                      <TableRow
+                        key={`${row.id}:detail`}
+                        className="hover:bg-transparent"
+                      >
+                        <TableCell
+                          colSpan={visibleColCount}
+                          className="bg-[var(--color-background)]/40 px-6 py-4"
+                        >
+                          <TurnDetail tx={leafTx} />
+                        </TableCell>
+                      </TableRow>,
+                    );
+                  }
                 }
                 // Control row after the last visible row of this group.
                 // Renders 3 buttons by default — Show 5 | Collapse | Show all —

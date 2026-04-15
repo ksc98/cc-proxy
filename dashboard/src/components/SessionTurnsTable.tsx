@@ -15,7 +15,6 @@ import {
   Loader2,
   SlidersHorizontal,
   Search,
-  Sparkles,
 } from "lucide-react";
 import {
   Table,
@@ -39,16 +38,15 @@ import type { TransactionRow } from "@/lib/store";
 import {
   estimateCostUsd,
   fmtAgo,
-  fmtBytes,
   fmtDuration,
   fmtInt,
-  fmtTs,
   fmtUsd,
 } from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
+import { TurnDetail } from "@/components/TurnDetail";
 
 type TurnRow = {
   tx: TransactionRow;
@@ -367,12 +365,13 @@ export default function SessionTurnsTable({
 }) {
   const [rows, setRows] = React.useState<TransactionRow[]>(initialRows);
   const [sorting, setSorting] = React.useState<SortingState>([
-    { id: "turn", desc: false },
+    { id: "turn", desc: true },
   ]);
   const [globalFilter, setGlobalFilter] = React.useState("");
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>({});
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  const [highlightTxId, setHighlightTxId] = React.useState<string | null>(null);
 
   React.useEffect(() => subscribeRows(setRows), []);
 
@@ -380,6 +379,50 @@ export default function SessionTurnsTable({
     () => toTurns(rows, sessionId),
     [rows, sessionId],
   );
+
+  // Deep-link handling: if the URL fragment is #<tx_id> (set by command palette
+  // result links), auto-expand that turn, scroll it into view, and flash a
+  // highlight so it's obvious which row matched. Re-runs when `data` grows
+  // in case the row arrives via polling after first paint, but a ref guard
+  // prevents re-scrolling the user away on every subsequent row update.
+  const handledHashRef = React.useRef<string | null>(null);
+  const highlightTimerRef = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    const apply = () => {
+      const raw = typeof window !== "undefined" ? window.location.hash.slice(1) : "";
+      if (!raw) return;
+      const txId = decodeURIComponent(raw);
+      if (handledHashRef.current === txId) return;
+      if (!data.some((d) => d.tx.tx_id === txId)) return;
+      handledHashRef.current = txId;
+      setExpanded((p) => ({ ...p, [txId]: true }));
+      setHighlightTxId(txId);
+      requestAnimationFrame(() => {
+        document
+          .getElementById(`row-${txId}`)
+          ?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+      if (highlightTimerRef.current != null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightTxId(null);
+        highlightTimerRef.current = null;
+      }, 2800);
+    };
+    apply();
+    const onHash = () => {
+      handledHashRef.current = null;
+      apply();
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      if (highlightTimerRef.current != null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, [data]);
 
   const table = useReactTable({
     data,
@@ -518,7 +561,12 @@ export default function SessionTurnsTable({
               return (
                 <React.Fragment key={row.id}>
                   <TableRow
-                    className="cursor-pointer"
+                    id={`row-${tx.tx_id}`}
+                    className={cn(
+                      "cursor-pointer scroll-mt-24 transition-colors duration-700",
+                      highlightTxId === tx.tx_id &&
+                        "bg-amber-400/10 outline outline-2 -outline-offset-2 outline-amber-400/60",
+                    )}
                     onClick={() =>
                       setExpanded((p) => ({ ...p, [tx.tx_id]: !p[tx.tx_id] }))
                     }
@@ -571,147 +619,5 @@ export default function SessionTurnsTable({
         </Table>
       )}
     </section>
-  );
-}
-
-function TurnDetail({ tx }: { tx: TransactionRow }) {
-  const tools: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-xs">
-      <DetailRow label="tx_id" value={<code className="font-mono">{tx.tx_id}</code>} />
-      <DetailRow label="ts" value={<span className="font-mono">{fmtTs(tx.ts)}</span>} />
-      <DetailRow
-        label="url"
-        value={
-          <code
-            className="font-mono text-[var(--color-muted-foreground)] break-all"
-            title={tx.url ?? undefined}
-          >
-            {tx.method ? `${tx.method} ` : ""}{tx.url ?? "—"}
-          </code>
-        }
-      />
-      <DetailRow
-        label="status"
-        value={
-          <span
-            className={cn(
-              "font-mono tabular-nums",
-              tx.status >= 400
-                ? "text-[var(--color-danger)]"
-                : "text-[var(--color-good)]",
-            )}
-          >
-            {tx.status}
-          </span>
-        }
-      />
-      <DetailRow
-        label="stop_reason"
-        value={
-          <span className="font-mono">
-            {(() => {
-              const cls = stopDotClass(tx.stop_reason);
-              return cls ? (
-                <span className={cn("dot", cls)} style={{ marginRight: 6 }} />
-              ) : null;
-            })()}
-            {tx.stop_reason ?? "—"}
-          </span>
-        }
-      />
-      <DetailRow
-        label="req / resp bytes"
-        value={
-          <span className="font-mono tabular-nums">
-            {fmtBytes(tx.req_body_bytes)} · {fmtBytes(tx.resp_body_bytes)}
-          </span>
-        }
-      />
-      {tx.max_tokens != null && (
-        <DetailRow
-          label="max_tokens"
-          value={
-            <span className="font-mono tabular-nums">
-              {fmtInt(tx.output_tokens)} / {fmtInt(tx.max_tokens)}
-              <span className="text-[var(--color-subtle-foreground)] ml-2">
-                ({((tx.output_tokens / tx.max_tokens) * 100).toFixed(0)}%)
-              </span>
-            </span>
-          }
-        />
-      )}
-      {(tx.thinking_budget != null || (tx.thinking_blocks ?? 0) > 0) && (
-        <DetailRow
-          label="thinking"
-          value={
-            <span className="font-mono tabular-nums inline-flex items-center gap-2">
-              <Sparkles size={11} className="text-[var(--color-chart-4)]" />
-              {tx.thinking_budget != null && (
-                <span>budget {fmtInt(tx.thinking_budget)}</span>
-              )}
-              {(tx.thinking_blocks ?? 0) > 0 && (
-                <span className="text-[var(--color-muted-foreground)]">
-                  · {tx.thinking_blocks} block
-                  {(tx.thinking_blocks ?? 0) > 1 ? "s" : ""}
-                </span>
-              )}
-            </span>
-          }
-        />
-      )}
-      {(tx.cache_creation_5m != null || tx.cache_creation_1h != null) && (
-        <DetailRow
-          label="cache writes"
-          value={
-            <span className="font-mono tabular-nums text-[var(--color-muted-foreground)]">
-              {fmtInt(tx.cache_creation_5m ?? 0)} × 5m ·{" "}
-              {fmtInt(tx.cache_creation_1h ?? 0)} × 1h
-            </span>
-          }
-        />
-      )}
-      {(tx.rl_tok_remaining != null && tx.rl_tok_limit != null) && (
-        <DetailRow
-          label="rate-limit"
-          value={
-            <span className="font-mono tabular-nums text-[var(--color-muted-foreground)]">
-              {fmtInt(tx.rl_tok_remaining)} / {fmtInt(tx.rl_tok_limit)} input tokens remaining
-            </span>
-          }
-        />
-      )}
-      {tools.length > 0 && (
-        <div className="md:col-span-2">
-          <p className="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] mb-1">
-            Tools ({tools.length})
-          </p>
-          <div className="flex flex-wrap gap-1">
-            {tools.map((t, i) => (
-              <span key={`${t}-${i}`} className="chip" title={t}>
-                {shortToolName(t)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-baseline gap-3 min-w-0">
-      <span className="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] w-24 shrink-0">
-        {label}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{value}</span>
-    </div>
   );
 }

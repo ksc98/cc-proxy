@@ -17,6 +17,7 @@ import {
   type TransactionRow,
   type SessionEnds,
 } from "@/lib/store";
+import { buildSessionList } from "@/lib/sessions";
 import {
   estimateCostUsd,
   fmtInt,
@@ -104,6 +105,8 @@ const rateLimit =
     ? { tokRemaining: rlRow.rl_tok_remaining, tokLimit: rlRow.rl_tok_limit }
     : null;
 
+const sessionList = buildSessionList(allRows, sessionEnds);
+
 function shortSession(id: string): string {
   return id.slice(0, 8);
 }
@@ -165,7 +168,8 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
     activeSession: active ? shortSession(sessionId) : null,
     rateLimit,
   }}
-  activePath={`/session/${sessionId}`}
+  sessions={sessionList}
+  currentSessionId={sessionId}
 >
   <RowsPoller client:load intervalMs={1000} />
 

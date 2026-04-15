@@ -8,10 +8,10 @@ import Sparkline from "@/components/Sparkline.astro";
 import TokenChart from "@/components/TokenChart";
 import RecentTurnsTable from "@/components/RecentTurnsTable";
 import RowsPoller from "@/components/RowsPoller";
-import { SearchBox } from "@/components/SearchBox";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
 import { getStats, getRecent, getSessionEnds, type TransactionRow, type SessionEnds } from "@/lib/store";
+import { buildSessionList } from "@/lib/sessions";
 import { estimateCostUsd, fmtInt, fmtUsd, fmtAgo, fmtDuration } from "@/lib/format";
 import {
   MessageSquare,
@@ -120,72 +120,17 @@ const chartData = chron
     cost: estimateCostUsd(r),
   }));
 
-// Attribute rows to sessions.
-type SessionAgg = {
-  id: string;
-  turns: number;
-  firstTs: number;
-  lastTs: number;
-  cost: number;
-  output: number;
-  cacheRead: number;
-  models: Map<string, number>;
-};
-const sessionMap = new Map<string, SessionAgg>();
-for (const r of rows) {
-  if (!r.session_id) continue;
-  const cur =
-    sessionMap.get(r.session_id) ??
-    ({
-      id: r.session_id,
-      turns: 0,
-      firstTs: r.ts,
-      lastTs: r.ts,
-      cost: 0,
-      output: 0,
-      cacheRead: 0,
-      models: new Map(),
-    } satisfies SessionAgg);
-  cur.turns += 1;
-  cur.firstTs = Math.min(cur.firstTs, r.ts);
-  cur.lastTs = Math.max(cur.lastTs, r.ts);
-  cur.cost += estimateCostUsd(r);
-  cur.output += r.output_tokens;
-  cur.cacheRead += r.cache_read;
-  if (r.model) {
-    cur.models.set(r.model, (cur.models.get(r.model) ?? 0) + 1);
-  }
-  sessionMap.set(r.session_id, cur);
-}
-// A session is "active" if its most recent turn lands within this window.
-const ACTIVE_WINDOW_MS = 3 * 60_000;
+// Attribute rows to sessions (shared aggregator used by sidebar too).
+const sessionList = buildSessionList(rows, sessionEnds);
+const activeSession = sessionList.find((s) => s.active) ?? null;
 const now = Date.now();
-// A session is active iff (a) last turn is within the window AND (b) no
-// SessionEnd marker has been recorded at or after that last turn.
-const isActive = (s: SessionAgg) => {
-  if (now - s.lastTs >= ACTIVE_WINDOW_MS) return false;
-  const endedAt = sessionEnds[s.id];
-  return endedAt == null || endedAt < s.lastTs;
-};
-// Active sessions sort ahead of inactive ones; within each group, most
-// recent turn first. An idle-but-recent session should never outrank a
-// live one just because its last turn happened to land more recently.
-const sessionList = [...sessionMap.values()].sort((a, b) => {
-  const aa = isActive(a) ? 1 : 0;
-  const ba = isActive(b) ? 1 : 0;
-  if (aa !== ba) return ba - aa;
-  return b.lastTs - a.lastTs;
-});
-const activeSession = sessionList.find(isActive) ?? null;
 
 function shortSession(id: string): string {
   return id.slice(0, 8);
 }
-function sessionModels(s: SessionAgg): string {
-  const top = [...s.models.entries()].sort((a, b) => b[1] - a[1])[0];
-  if (!top) return "—";
-  const name = top[0].replace(/-\d{8}$/, "").replace(/^claude-/, "");
-  return s.models.size > 1 ? `${name} +${s.models.size - 1}` : name;
+function sessionModels(s: (typeof sessionList)[number]): string {
+  if (!s.topModel) return "—";
+  return s.modelCount > 1 ? `${s.topModel} +${s.modelCount - 1}` : s.topModel;
 }
 
 // Trailing 5-minute burn rate ($/min).
@@ -224,7 +169,7 @@ const rateLimit =
     errorRate,
     rateLimit,
   }}
-  activePath="/"
+  sessions={sessionList}
 >
   <RowsPoller client:load intervalMs={1000} />
   <div class="mb-7 flex items-baseline justify-between">
@@ -346,7 +291,7 @@ const rateLimit =
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
           {sessionList.slice(0, 8).map((s) => {
-            const active = isActive(s);
+            const active = s.active;
             return (
             <a
               href={`/session/${s.id}`}
@@ -380,7 +325,7 @@ const rateLimit =
                   </p>
                 </div>
                 <div class="text-right">
-                  <p class="font-mono text-sm tabular-nums text-[var(--color-money)]">{fmtUsd(s.cost)}</p>
+                  <p class="font-mono text-sm tabular-nums text-[var(--color-money)]">{fmtUsd(s.costUsd)}</p>
                   <p class="text-xs text-[var(--color-subtle-foreground)] tabular-nums mt-1">
                     {fmtDuration(s.lastTs - s.firstTs)}
                   </p>
@@ -394,9 +339,6 @@ const rateLimit =
     )
   }
 
-  <section class="mt-6">
-    <SearchBox client:load />
-  </section>
 
   <RecentTurnsTable client:load initialRows={rows} />
 </Base>
