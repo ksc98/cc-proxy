@@ -24,6 +24,17 @@ class_name = "UserStore"
 tag = "v1"
 new_sqlite_classes = ["UserStore"]
 
+# Workers AI: used for embedding turn text (bge-base-en-v1.5, 768 dims).
+[ai]
+binding = "AI"
+
+# Vectorize: global semantic index. Isolation is enforced by a `user_hash`
+# metadata filter + an id prefix (`{user_hash}:{tx_id}`) on every upsert/query.
+# Provision once before first deploy: `just vectorize-create`.
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "claudemetry-turns"
+
 # Shared with the dashboard worker. Keys are namespaced by prefix:
 #   tok:<token_id>     bearer → "{uuid}|{email}", TTL 1h (auth cache)
 #   link:<email>       CF Access email → user_hash (dashboard scoping)

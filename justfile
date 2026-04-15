@@ -66,6 +66,35 @@ dashboard-tail:
 # Deploy both workers.
 deploy-all: deploy dashboard-deploy
 
+# -------- Vectorize --------
+
+# One-time provisioning for /_cm/search. Creates the `claudemetry-turns`
+# index (768-dim, cosine — matches bge-base-en-v1.5) and the `user_hash`
+# metadata index used as the per-caller isolation filter on every query.
+# Idempotent: re-runs treat "already exists" as success.
+vectorize-create:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    out=$(npx --yes wrangler@latest vectorize create claudemetry-turns \
+        --dimensions=768 --metric=cosine 2>&1)
+    echo "$out"
+    if echo "$out" | grep -qiE "successfully (created|enqueued)|already exists|duplicate_name|duplicate"; then
+        echo "→ index ready"
+    else
+        echo "× index create failed" >&2; exit 1
+    fi
+    out=$(npx --yes wrangler@latest vectorize create-metadata-index claudemetry-turns \
+        --property-name=user_hash --type=string 2>&1)
+    echo "$out"
+    if echo "$out" | grep -qiE "successfully (created|enqueued)|already exists|duplicate_name|duplicate"; then
+        echo "→ user_hash metadata index ready"
+    else
+        echo "× metadata index create failed" >&2; exit 1
+    fi
+
+vectorize-info:
+    npx --yes wrangler@latest vectorize info claudemetry-turns
+
 # -------- burnage (Rust CLI) --------
 
 # Install burnage to ~/.cargo/bin. Bakes https://$DOMAIN in as the default

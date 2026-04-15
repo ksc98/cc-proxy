@@ -157,8 +157,10 @@ Each user's private SQLite contains a single table (migrations are idempotent, a
 | `resp_body_bytes`        | INT     | Size of the captured response body                                  |
 | `in_flight`              | INT     | 1 between `/ingest/start` and `/ingest/finalize`; 0 once done        |
 | `anthropic_message_id`   | TEXT    | Anthropic's `message.id` (set on finalize)                           |
+| `user_text`              | TEXT    | Last `user` message's text blocks + `tool_result` content (finalize) |
+| `assistant_text`         | TEXT    | Concatenated `text_delta` from the SSE stream (finalize)             |
 
-Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep).
+Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep). An FTS5 virtual table (`transactions_fts`) mirrors `user_text` + `assistant_text` via sync triggers, and finalized turns are also embedded into a shared Vectorize index (`claudemetry-turns`, 768-dim, cosine) for semantic search — see **Search** below.
 
 Each request writes the row twice. A placeholder (`in_flight = 1`, all metrics zero) is
 inserted into the DO as soon as the request arrives, so the dashboard can show a spinner
@@ -166,6 +168,35 @@ while the upstream is still streaming. When the response completes, `/ingest/fin
 overwrites the row with the real metrics and flips `in_flight` to 0. If the worker is
 evicted between the two writes, the next fresh DO instance sweeps any placeholder older
 than 5 min to `stop_reason = 'error'`.
+
+### Search: `/_cm/search`
+
+Hybrid FTS5 + Vectorize lookup over `user_text` and `assistant_text`. `mode`
+defaults to `hybrid`; results from both indexes are merged via reciprocal-rank
+fusion (k=60) and `match_source` tags each hit as `fts`, `vector`, or `both`.
+
+```bash
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
+  -d '{"q":"parse_sse_usage","mode":"fts"}'
+
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
+  -d '{"q":"the OAuth debugging session","mode":"vector"}'
+
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
+  -d '{"q":"auth flow","mode":"hybrid","limit":20}'
+```
+
+Isolation for Vectorize is enforced two ways: each vector is keyed
+`{user_hash}:{tx_id}` and its `user_hash` metadata is used as a server-side
+`filter` on every query. FTS5 is trivially isolated — it lives inside each
+user's own Durable Object.
+
+Provision the Vectorize index once before first deploy:
+
+```bash
+just vectorize-create        # idempotent; creates index + user_hash metadata index
+just vectorize-info          # sanity check
+```
 
 ## Admin probes
 
@@ -214,7 +245,7 @@ Each transaction also emits two structured JSON log lines to `wrangler tail`:
 {"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-6","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"msg_…","body_len":2472}
 ```
 
-`authorization` and `x-api-key` values are never written to logs. The raw prompt/response bodies are not logged in the deployed worker either — they're parsed for metrics and then discarded.
+`authorization` and `x-api-key` values are never written to logs. The raw prompt/response bodies are not logged in the deployed worker either — they're parsed for metrics (and for the `user_text` / `assistant_text` search columns) and then discarded.
 
 ## Layout
 
@@ -228,4 +259,4 @@ Each transaction also emits two structured JSON log lines to `wrangler tail`:
 
 The proxy does not authenticate callers. Anyone with the deployed URL can use it as an open relay to Anthropic (they still need their own Anthropic credentials, which are forwarded as-is). If that matters for your deployment, add a shared-secret header check at the top of `fetch` in `src/lib.rs`, or put the worker behind Cloudflare Access.
 
-The operator of the proxy has in-memory access to your raw token and prompt bodies while a request is in flight — this is unavoidable for any proxy. The code only persists a salted hash and parsed metrics; bodies are not stored. If you want stronger guarantees, the source is small (~250 lines) and trivial to fork and run on your own Cloudflare account.
+The operator of the proxy has in-memory access to your raw token and prompt bodies while a request is in flight — this is unavoidable for any proxy. The code persists parsed metrics **plus the text of the last user-turn message (including `tool_result` payloads) and the assistant's text output**, so that `/_cm/search` (FTS5 + Vectorize) is useful. `tool_result` blocks often contain file contents or command output that your assistant saw — treat the DO's SQLite as sensitive accordingly. If you want stronger guarantees, the source is small and trivial to fork and run on your own Cloudflare account; disabling search is a one-line change (skip the `user_text` / `assistant_text` fields in `TransactionRecord`).

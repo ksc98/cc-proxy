@@ -1,7 +1,9 @@
-use js_sys::Uint8Array;
+use js_sys::{Array, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use worker::durable::State;
 use worker::kv::KvStore;
 use worker::*;
@@ -150,7 +152,16 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         };
 
         // Request-side knobs. Cheap to parse — the body is already in memory.
-        let (max_tokens, thinking_budget) = parse_request_body(&req_body_for_parse);
+        let ParsedRequest {
+            max_tokens,
+            thinking_budget,
+            user_text,
+        } = parse_request_body(&req_body_for_parse);
+        let assistant_text = if stats.assistant_text.is_empty() {
+            None
+        } else {
+            Some(stats.assistant_text.clone())
+        };
         let (rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit) =
             parse_rate_limits(&resp_headers_vec);
 
@@ -194,13 +205,15 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             rl_tok_limit,
             in_flight: Some(0),
             anthropic_message_id,
+            user_text,
+            assistant_text,
         };
 
         // Always emit a structured response log so wrangler tail still works.
         let log = json!({
             "ts": Date::now().as_millis() as i64,
             "dir": "resp",
-            "user_hash": user_hash,
+            "user_hash": user_hash.clone(),
             "session_id": record.session_id,
             "tx_id": record.tx_id,
             "status": status,
@@ -218,6 +231,43 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
 
         if let Some(stub) = finalize_stub {
             post_record_to_do(&stub, "/ingest/finalize", &record).await;
+
+            // Best-effort Vectorize upsert. Failures are logged but never
+            // block the SQLite finalize, which already succeeded above.
+            if let Some(uh) = user_hash.as_deref() {
+                let combined = format!(
+                    "{}\n---\n{}",
+                    record.user_text.as_deref().unwrap_or(""),
+                    record.assistant_text.as_deref().unwrap_or(""),
+                );
+                if combined.trim().len() > 3 {
+                    match embed_text(&env, &combined).await {
+                        Some(vec) => {
+                            if let Err(e) = vectorize_upsert(
+                                &env,
+                                uh,
+                                &record.tx_id,
+                                record.session_id.as_deref(),
+                                record.ts,
+                                &vec,
+                            )
+                            .await
+                            {
+                                console_log!(
+                                    "{{\"dir\":\"vectorize_upsert_err\",\"err\":\"{}\"}}",
+                                    e
+                                );
+                            }
+                        }
+                        None => {
+                            console_log!(
+                                "{{\"dir\":\"embed_err\",\"tx_id\":\"{}\"}}",
+                                record.tx_id
+                            );
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -251,6 +301,13 @@ async fn admin_route(
     // own DO.
     let mut target_hash = user_hash.clone();
     let mut forwarded_body: Vec<u8> = body.to_vec();
+
+    // Search is multi-stage (FTS + Vectorize + merge) and needs env.AI +
+    // env.VECTORIZE in addition to the caller's DO, so we handle it here
+    // rather than in the flat DO passthrough table below.
+    if path == "/_cm/search" && method == &Method::Post {
+        return handle_search(&user_hash, &forwarded_body, env).await;
+    }
 
     let (inner_method, inner_path) = match (method, path) {
         (&Method::Get, "/_cm/recent") => (Method::Get, "/recent"),
@@ -361,6 +418,8 @@ impl DurableObject for UserStore {
             (Method::Get, "/recent") => self.recent().await,
             (Method::Get, "/stats") => self.stats().await,
             (Method::Post, "/sql") => self.sql_exec(&mut req).await,
+            (Method::Post, "/search/fts") => self.search_fts(&mut req).await,
+            (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -428,6 +487,11 @@ impl UserStore {
             // synthetic `inflight-<ts>-<rand>` so that placeholder → finalize
             // doesn't mutate the PK (which the dashboard keys rows by).
             ("anthropic_message_id", "TEXT"),
+            // Free-text search columns. Populated on finalize: the last
+            // user-role message's text (incl. tool_result content) and the
+            // assistant's text_delta stream output.
+            ("user_text", "TEXT"),
+            ("assistant_text", "TEXT"),
         ];
         for (name, typ) in new_cols {
             let _ = sql.exec(
@@ -435,6 +499,43 @@ impl UserStore {
                 None,
             );
         }
+
+        // FTS5 search index over user_text + assistant_text. External-content
+        // mode keeps tokens in a separate table while referencing `transactions`
+        // rows by rowid. `porter` stemming lets "parsing" match "parse";
+        // `unicode61` handles non-ASCII. `tx_id TEXT PRIMARY KEY` does NOT
+        // alias rowid, so the implicit integer rowid is safe to use here.
+        let _ = sql.exec(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
+                user_text, assistant_text,
+                content='transactions', content_rowid='rowid',
+                tokenize='porter unicode61'
+            )",
+            None,
+        );
+        let _ = sql.exec(
+            "CREATE TRIGGER IF NOT EXISTS transactions_ai AFTER INSERT ON transactions BEGIN
+                INSERT INTO transactions_fts(rowid, user_text, assistant_text)
+                VALUES (new.rowid, new.user_text, new.assistant_text);
+            END",
+            None,
+        );
+        let _ = sql.exec(
+            "CREATE TRIGGER IF NOT EXISTS transactions_ad AFTER DELETE ON transactions BEGIN
+                INSERT INTO transactions_fts(transactions_fts, rowid, user_text, assistant_text)
+                VALUES ('delete', old.rowid, old.user_text, old.assistant_text);
+            END",
+            None,
+        );
+        let _ = sql.exec(
+            "CREATE TRIGGER IF NOT EXISTS transactions_au AFTER UPDATE ON transactions BEGIN
+                INSERT INTO transactions_fts(transactions_fts, rowid, user_text, assistant_text)
+                VALUES ('delete', old.rowid, old.user_text, old.assistant_text);
+                INSERT INTO transactions_fts(rowid, user_text, assistant_text)
+                VALUES (new.rowid, new.user_text, new.assistant_text);
+            END",
+            None,
+        );
         // Partial index keeps the per-init stale-sweep UPDATE cheap: it only
         // touches rows that are actually in flight, which is ~0 at rest.
         let _ = sql.exec(
@@ -543,8 +644,9 @@ impl UserStore {
               stop_reason, tools_json, req_body_bytes, resp_body_bytes,
               cache_creation_5m, cache_creation_1h, thinking_budget, thinking_blocks,
               max_tokens, rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit,
-              in_flight, anthropic_message_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+              in_flight, anthropic_message_id,
+              user_text, assistant_text)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         );
         sql.exec(
             &stmt,
@@ -576,6 +678,8 @@ impl UserStore {
                 r.rl_tok_limit.into(),
                 r.in_flight.into(),
                 r.anthropic_message_id.clone().into(),
+                r.user_text.clone().into(),
+                r.assistant_text.clone().into(),
             ]),
         )?;
         Ok(())
@@ -591,7 +695,8 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id
+                    in_flight, anthropic_message_id,
+                    user_text, assistant_text
              FROM transactions ORDER BY ts DESC",
             None,
         )?;
@@ -621,6 +726,76 @@ impl UserStore {
             obj.insert("storage_bytes".into(), json!(sql.database_size() as i64));
         }
         Response::from_json(&summary)
+    }
+
+    // FTS5 full-text search over user_text + assistant_text. `snippet()` emits
+    // a short window around the match with <mark> highlights; `bm25()` scores
+    // lower-is-better, so we negate it to make it sortable alongside Vectorize
+    // cosine scores on the caller side.
+    async fn search_fts(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            q: String,
+            #[serde(default)]
+            limit: Option<i64>,
+        }
+        let b: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if b.q.trim().is_empty() {
+            return Response::error("missing q", 400);
+        }
+        let limit = b.limit.unwrap_or(20).clamp(1, 100);
+
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT t.tx_id, t.ts, t.session_id, t.model,
+                    snippet(transactions_fts, 0, '<mark>', '</mark>', '…', 10) AS user_snip,
+                    snippet(transactions_fts, 1, '<mark>', '</mark>', '…', 10) AS asst_snip,
+                    -bm25(transactions_fts) AS score
+             FROM transactions_fts
+             JOIN transactions t ON t.rowid = transactions_fts.rowid
+             WHERE transactions_fts MATCH ?
+             ORDER BY bm25(transactions_fts) ASC
+             LIMIT ?",
+            Some(vec![b.q.into(), limit.into()]),
+        );
+        let rows: Vec<serde_json::Value> = match cursor {
+            Ok(c) => c.to_array().unwrap_or_default(),
+            Err(e) => return sql_error_response(&format!("fts: {e}")),
+        };
+        Response::from_json(&rows)
+    }
+
+    // Hydrate a set of tx_ids (from Vectorize) into the fields the proxy needs
+    // to present search results. Snippets here are plain truncations — not
+    // highlighted — since there's no MATCH to feed `snippet()`.
+    async fn search_hydrate(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            tx_ids: Vec<String>,
+        }
+        let b: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if b.tx_ids.is_empty() {
+            return Response::from_json(&serde_json::Value::Array(Vec::new()));
+        }
+        let ids: Vec<String> = b.tx_ids.into_iter().take(200).collect();
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let query = format!(
+            "SELECT tx_id, ts, session_id, model,
+                    substr(COALESCE(user_text, ''), 1, 200) AS user_snip,
+                    substr(COALESCE(assistant_text, ''), 1, 200) AS asst_snip
+             FROM transactions WHERE tx_id IN ({})",
+            placeholders
+        );
+        let params: Vec<SqlStorageValue> = ids.into_iter().map(SqlStorageValue::from).collect();
+        let cursor = self.state.storage().sql().exec(&query, Some(params))?;
+        let rows: Vec<serde_json::Value> = cursor.to_array().unwrap_or_default();
+        Response::from_json(&rows)
     }
 
     // Generic SQL execution endpoint. Powers `burnage shell` and any other
@@ -764,6 +939,13 @@ struct TransactionRecord {
     in_flight: Option<i64>,
     #[serde(default)]
     anthropic_message_id: Option<String>,
+    /// Text of the caller's last `user` message — new prompt + tool_result
+    /// payloads. Indexed by FTS5 + embedded for Vectorize.
+    #[serde(default)]
+    user_text: Option<String>,
+    /// Concatenated `text_delta` payloads from the assistant's SSE stream.
+    #[serde(default)]
+    assistant_text: Option<String>,
 }
 
 // ---------- SSE parsing ----------
@@ -781,6 +963,10 @@ struct SseStats {
     stop_reason: Option<String>,
     tools: Vec<String>,
     thinking_blocks: i64,
+    /// Concatenation of every `text_delta` payload from the stream — the
+    /// assistant's user-facing prose. `thinking_delta` (private reasoning)
+    /// and `input_json_delta` (tool args) are intentionally skipped.
+    assistant_text: String,
 }
 
 fn parse_sse_usage(body: &str) -> SseStats {
@@ -834,6 +1020,26 @@ fn parse_sse_usage(body: &str) -> SseStats {
                     }
                 }
             }
+            "content_block_delta" => {
+                // Only accumulate plain text output — tool-call JSON and
+                // private thinking deltas are excluded from the search index.
+                if let Some(d) = evt.get("delta") {
+                    if d.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
+                        if let Some(t) = d.get("text").and_then(|v| v.as_str()) {
+                            if stats.assistant_text.len() + t.len() <= TEXT_COL_CAP {
+                                stats.assistant_text.push_str(t);
+                            } else if stats.assistant_text.len() < TEXT_COL_CAP {
+                                let remaining = TEXT_COL_CAP - stats.assistant_text.len();
+                                let mut end = remaining;
+                                while end > 0 && !t.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                stats.assistant_text.push_str(&t[..end]);
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -864,12 +1070,25 @@ fn merge_usage(s: &mut SseStats, u: &serde_json::Value) {
     }
 }
 
-// Parse the inbound request body (not required — errors return defaults).
-// Returns (max_tokens, thinking_budget).
-fn parse_request_body(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
+// Maximum characters we persist per text column. Typical turns are < 10 KB;
+// this cap catches pathological file dumps from tool_result blocks without
+// letting a single DO grow unbounded.
+const TEXT_COL_CAP: usize = 256 * 1024;
+
+#[derive(Default)]
+struct ParsedRequest {
+    max_tokens: Option<i64>,
+    thinking_budget: Option<i64>,
+    /// Concatenated text of the last user-role message's content blocks:
+    /// `text` blocks verbatim, and `tool_result` blocks' string/array text.
+    /// `image` blocks are skipped. Truncated to `TEXT_COL_CAP` chars.
+    user_text: Option<String>,
+}
+
+fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
     let v: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(_) => return ParsedRequest::default(),
     };
     let max_tokens = v.get("max_tokens").and_then(|x| x.as_i64());
     let thinking_budget = v
@@ -877,7 +1096,97 @@ fn parse_request_body(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
         .and_then(|t| t.as_object())
         .filter(|o| o.get("type").and_then(|x| x.as_str()) == Some("enabled"))
         .and_then(|o| o.get("budget_tokens").and_then(|x| x.as_i64()));
-    (max_tokens, thinking_budget)
+
+    // Find the LAST user-role message — that's the one carrying the turn's
+    // new content. Earlier entries are the replayed conversation prefix and
+    // are already captured on their own turn's row.
+    let user_text = v
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        })
+        .map(|m| extract_user_message_text(m.get("content")))
+        .filter(|s: &String| !s.is_empty())
+        .map(truncate_text);
+
+    ParsedRequest {
+        max_tokens,
+        thinking_budget,
+        user_text,
+    }
+}
+
+// `content` is either a string (short-form) or an array of typed blocks.
+fn extract_user_message_text(content: Option<&serde_json::Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    let Some(blocks) = content.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for block in blocks {
+        let t = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match t {
+            "text" => {
+                if let Some(s) = block.get("text").and_then(|v| v.as_str()) {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(s);
+                }
+            }
+            "tool_result" => {
+                // Caller opted into tool_result capture. `content` here is
+                // the output the assistant saw (file reads, bash stdout,
+                // etc.) — can contain secrets; we don't scrub.
+                let inner = block.get("content");
+                let extracted = match inner {
+                    Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+                    Some(v) if v.is_array() => {
+                        // Array of nested blocks — pull out `text` entries.
+                        let mut acc = String::new();
+                        for b in v.as_array().unwrap() {
+                            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                                if !acc.is_empty() {
+                                    acc.push('\n');
+                                }
+                                acc.push_str(t);
+                            }
+                        }
+                        acc
+                    }
+                    _ => String::new(),
+                };
+                if !extracted.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&extracted);
+                }
+            }
+            // image, document, etc. — skip.
+            _ => {}
+        }
+    }
+    out
+}
+
+fn truncate_text(mut s: String) -> String {
+    if s.len() > TEXT_COL_CAP {
+        s.truncate(TEXT_COL_CAP);
+        // Back up to a char boundary so we never leave a split codepoint.
+        while !s.is_char_boundary(s.len()) {
+            s.pop();
+        }
+    }
+    s
 }
 
 // Anthropic rate-limit headers come back as plain integers in decimal.
@@ -894,6 +1203,399 @@ fn parse_rate_limits(
         g("anthropic-ratelimit-input-tokens-limit")
             .or_else(|| g("anthropic-ratelimit-tokens-limit")),
     )
+}
+
+// ---------- Workers AI + Vectorize ----------
+
+const EMBED_MODEL: &str = "@cf/baai/bge-base-en-v1.5";
+const EMBED_DIMS: usize = 768;
+// bge-base-en-v1.5 context is ~512 tokens (~2000 chars rule of thumb).
+// We truncate from the front so the tail — usually the most recent
+// prompt + the assistant's summary — stays in the embedding.
+const EMBED_INPUT_CAP: usize = 2000;
+
+/// Thin `JsValue` wrapper that goes through `env.get_binding` without
+/// requiring a specific JS constructor name. Worker 0.8 ships with an `Ai`
+/// binding but no first-class Vectorize type, so we drive the binding via
+/// `js_sys::Reflect`.
+#[repr(transparent)]
+struct VectorizeBinding(JsValue);
+
+impl AsRef<JsValue> for VectorizeBinding {
+    fn as_ref(&self) -> &JsValue {
+        &self.0
+    }
+}
+
+impl From<VectorizeBinding> for JsValue {
+    fn from(b: VectorizeBinding) -> Self {
+        b.0
+    }
+}
+
+impl JsCast for VectorizeBinding {
+    fn instanceof(_: &JsValue) -> bool {
+        true
+    }
+    fn unchecked_from_js(val: JsValue) -> Self {
+        Self(val)
+    }
+    fn unchecked_from_js_ref(val: &JsValue) -> &Self {
+        unsafe { &*(val as *const JsValue as *const Self) }
+    }
+}
+
+impl EnvBinding for VectorizeBinding {
+    // Actual class varies in the runtime; default `get` matches on this
+    // string, so we override below to accept whatever the binding is.
+    const TYPE_NAME: &'static str = "Vectorize";
+    fn get(val: JsValue) -> Result<Self> {
+        if val.is_undefined() {
+            Err("VECTORIZE binding is undefined".into())
+        } else {
+            Ok(Self(val))
+        }
+    }
+}
+
+/// Call a JS method by name that returns a Promise, await it.
+async fn call_js_method(
+    this: &JsValue,
+    name: &str,
+    args: &[JsValue],
+) -> std::result::Result<JsValue, JsValue> {
+    let f = Reflect::get(this, &JsValue::from_str(name))?;
+    let f: js_sys::Function = f.dyn_into()?;
+    let args_arr = Array::new();
+    for a in args {
+        args_arr.push(a);
+    }
+    let ret = f.apply(this, &args_arr)?;
+    let promise: js_sys::Promise = ret.dyn_into()?;
+    JsFuture::from(promise).await
+}
+
+/// Call Workers AI to produce a 768-dim embedding for `text`. Returns None
+/// on any error — callers treat Vectorize indexing as best-effort.
+async fn embed_text(env: &Env, text: &str) -> Option<Vec<f32>> {
+    if text.is_empty() {
+        return None;
+    }
+    let ai = env.ai("AI").ok()?;
+    let trimmed = if text.len() <= EMBED_INPUT_CAP {
+        text
+    } else {
+        // Keep the tail — front of a replayed turn is often boilerplate,
+        // while the new prompt + assistant output live near the end.
+        let start = text.len() - EMBED_INPUT_CAP;
+        let mut s = start;
+        while s < text.len() && !text.is_char_boundary(s) {
+            s += 1;
+        }
+        &text[s..]
+    };
+    let input = json!({ "text": trimmed });
+    let out: serde_json::Value = ai.run(EMBED_MODEL, input).await.ok()?;
+    // Shape: { shape: [1, 768], data: [[...768 floats...]], pooling: "mean" }
+    let row = out.get("data")?.as_array()?.first()?.as_array()?;
+    if row.len() != EMBED_DIMS {
+        return None;
+    }
+    Some(
+        row.iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect(),
+    )
+}
+
+async fn vectorize_upsert(
+    env: &Env,
+    user_hash: &str,
+    tx_id: &str,
+    session_id: Option<&str>,
+    ts: i64,
+    values: &[f32],
+) -> std::result::Result<(), String> {
+    let vec_binding = env
+        .get_binding::<VectorizeBinding>("VECTORIZE")
+        .map_err(|e| format!("binding: {e}"))?;
+
+    // id prefix enforces isolation even if the metadata filter is ever misconfigured.
+    let id = format!("{}:{}", user_hash, tx_id);
+    let metadata = json!({
+        "user_hash": user_hash,
+        "session_id": session_id.unwrap_or(""),
+        "ts": ts,
+    });
+    let record = json!({
+        "id": id,
+        "values": values,
+        "metadata": metadata,
+    });
+    let vectors = serde_json::Value::Array(vec![record]);
+    let arg = serde_wasm_bindgen::to_value(&vectors).map_err(|e| format!("encode: {e}"))?;
+
+    call_js_method(&vec_binding.0, "upsert", &[arg])
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("upsert: {:?}", e))
+}
+
+/// Query Vectorize for top-K nearest vectors under the caller's user_hash.
+async fn vectorize_query(
+    env: &Env,
+    user_hash: &str,
+    query_vec: &[f32],
+    top_k: usize,
+) -> std::result::Result<Vec<(String, f64)>, String> {
+    let vec_binding = env
+        .get_binding::<VectorizeBinding>("VECTORIZE")
+        .map_err(|e| format!("binding: {e}"))?;
+
+    let values: Vec<f64> = query_vec.iter().map(|&x| x as f64).collect();
+    let q_arg = serde_wasm_bindgen::to_value(&values).map_err(|e| format!("encode q: {e}"))?;
+    let opts = json!({
+        "topK": top_k,
+        "filter": { "user_hash": user_hash },
+        "returnMetadata": "all",
+    });
+    let opts_arg = serde_wasm_bindgen::to_value(&opts).map_err(|e| format!("encode opts: {e}"))?;
+
+    let raw = call_js_method(&vec_binding.0, "query", &[q_arg, opts_arg])
+        .await
+        .map_err(|e| format!("query: {:?}", e))?;
+
+    // Response shape: { matches: [{id, score, metadata?}], count }
+    let parsed: serde_json::Value = serde_wasm_bindgen::from_value(raw)
+        .map_err(|e| format!("decode: {e}"))?;
+    let matches = parsed
+        .get("matches")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(matches.len());
+    for m in matches {
+        let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Strip the user_hash prefix so callers see the raw tx_id.
+        let tx_id = id
+            .strip_prefix(&format!("{}:", user_hash))
+            .unwrap_or(id)
+            .to_string();
+        let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        out.push((tx_id, score));
+    }
+    Ok(out)
+}
+
+// ---------- /_cm/search ----------
+
+#[derive(Deserialize, Default)]
+struct SearchQuery {
+    q: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct SearchHit {
+    tx_id: String,
+    ts: i64,
+    session_id: Option<String>,
+    model: Option<String>,
+    user_snip: Option<String>,
+    asst_snip: Option<String>,
+    #[serde(default)]
+    score: f64,
+    match_source: String,
+}
+
+async fn handle_search(user_hash: &str, body: &[u8], env: &Env) -> Result<Response> {
+    let q: SearchQuery = serde_json::from_slice(body).unwrap_or_default();
+    if q.q.trim().is_empty() {
+        return Response::error("missing q", 400);
+    }
+    let mode = q.mode.as_deref().unwrap_or("hybrid");
+    let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
+
+    let ns = env.durable_object("USER_STORE")?;
+    let stub = ns.id_from_name(user_hash)?.get_stub()?;
+
+    match mode {
+        "fts" => {
+            let hits = search_fts(&stub, &q.q, limit).await.unwrap_or_default();
+            Response::from_json(&json!({ "mode": "fts", "results": hits }))
+        }
+        "vector" => {
+            let hits = search_vector(env, &stub, user_hash, &q.q, limit)
+                .await
+                .unwrap_or_default();
+            Response::from_json(&json!({ "mode": "vector", "results": hits }))
+        }
+        _ => {
+            // Hybrid: run both, merge via reciprocal rank fusion.
+            let fts_hits = search_fts(&stub, &q.q, limit).await.unwrap_or_default();
+            let vec_hits = search_vector(env, &stub, user_hash, &q.q, limit)
+                .await
+                .unwrap_or_default();
+            let merged = reciprocal_rank_fusion(fts_hits, vec_hits, limit);
+            Response::from_json(&json!({ "mode": "hybrid", "results": merged }))
+        }
+    }
+}
+
+async fn search_fts(
+    stub: &worker::durable::Stub,
+    q: &str,
+    limit: usize,
+) -> std::result::Result<Vec<SearchHit>, String> {
+    let body = serde_json::to_vec(&json!({ "q": q, "limit": limit })).unwrap();
+    let hits = call_do_json(stub, "/search/fts", &body).await?;
+    parse_hits(hits, "fts")
+}
+
+async fn search_vector(
+    env: &Env,
+    stub: &worker::durable::Stub,
+    user_hash: &str,
+    q: &str,
+    limit: usize,
+) -> std::result::Result<Vec<SearchHit>, String> {
+    let vec = embed_text(env, q).await.ok_or("embed failed")?;
+    let matches = vectorize_query(env, user_hash, &vec, limit).await?;
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx_ids: Vec<String> = matches.iter().map(|(id, _)| id.clone()).collect();
+    let body = serde_json::to_vec(&json!({ "tx_ids": tx_ids })).unwrap();
+    let hydrated = call_do_json(stub, "/search/hydrate", &body).await?;
+    let mut hits = parse_hits(hydrated, "vector")?;
+    // Graft the cosine-similarity scores from Vectorize onto the hydrated rows.
+    let score_by_id: std::collections::HashMap<String, f64> = matches.into_iter().collect();
+    for h in &mut hits {
+        if let Some(&s) = score_by_id.get(&h.tx_id) {
+            h.score = s;
+        }
+    }
+    // Preserve Vectorize's ranking (DO's IN() doesn't).
+    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(hits)
+}
+
+async fn call_do_json(
+    stub: &worker::durable::Stub,
+    path: &str,
+    body: &[u8],
+) -> std::result::Result<serde_json::Value, String> {
+    let arr = Uint8Array::from(body);
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    let headers = Headers::new();
+    headers.append("content-type", "application/json").ok();
+    init.with_headers(headers);
+    let req = Request::new_with_init(&format!("https://store{}", path), &init)
+        .map_err(|e| format!("build req: {e}"))?;
+    let mut resp = stub
+        .fetch_with_request(req)
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
+    let text = resp.text().await.map_err(|e| format!("body: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))
+}
+
+fn parse_hits(v: serde_json::Value, source: &str) -> std::result::Result<Vec<SearchHit>, String> {
+    let arr = v.as_array().ok_or_else(|| "expected array".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for row in arr {
+        let hit = SearchHit {
+            tx_id: row
+                .get("tx_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            ts: row.get("ts").and_then(|x| x.as_i64()).unwrap_or_default(),
+            session_id: row
+                .get("session_id")
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            model: row.get("model").and_then(|x| x.as_str()).map(String::from),
+            user_snip: row
+                .get("user_snip")
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            asst_snip: row
+                .get("asst_snip")
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            score: row.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            match_source: source.to_string(),
+        };
+        if !hit.tx_id.is_empty() {
+            out.push(hit);
+        }
+    }
+    Ok(out)
+}
+
+/// RRF: score = Σ 1 / (k + rank). k=60 is the standard constant (Cormack et al. 2009).
+fn reciprocal_rank_fusion(
+    fts: Vec<SearchHit>,
+    vec: Vec<SearchHit>,
+    limit: usize,
+) -> Vec<SearchHit> {
+    const K: f64 = 60.0;
+    let mut by_id: std::collections::HashMap<String, (SearchHit, f64, bool, bool)> =
+        std::collections::HashMap::new();
+
+    for (rank, hit) in fts.into_iter().enumerate() {
+        let key = hit.tx_id.clone();
+        let contrib = 1.0 / (K + (rank + 1) as f64);
+        by_id
+            .entry(key)
+            .and_modify(|(_, s, fts_seen, _)| {
+                *s += contrib;
+                *fts_seen = true;
+            })
+            .or_insert((hit, contrib, true, false));
+    }
+    for (rank, hit) in vec.into_iter().enumerate() {
+        let key = hit.tx_id.clone();
+        let contrib = 1.0 / (K + (rank + 1) as f64);
+        by_id
+            .entry(key)
+            .and_modify(|(existing, s, _, vec_seen)| {
+                *s += contrib;
+                *vec_seen = true;
+                if existing.user_snip.is_none() {
+                    existing.user_snip = hit.user_snip.clone();
+                }
+                if existing.asst_snip.is_none() {
+                    existing.asst_snip = hit.asst_snip.clone();
+                }
+            })
+            .or_insert((hit, contrib, false, true));
+    }
+
+    let mut merged: Vec<SearchHit> = by_id
+        .into_values()
+        .map(|(mut h, score, fts_seen, vec_seen)| {
+            h.score = score;
+            h.match_source = match (fts_seen, vec_seen) {
+                (true, true) => "both".into(),
+                (true, false) => "fts".into(),
+                (false, true) => "vector".into(),
+                _ => "unknown".into(),
+            };
+            h
+        })
+        .collect();
+    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(limit);
+    merged
 }
 
 // ---------- Identity ----------

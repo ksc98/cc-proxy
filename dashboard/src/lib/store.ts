@@ -36,6 +36,11 @@ export type TransactionRow = {
   in_flight?: number | null;
   /** Anthropic's `message.id` (set on finalize). Row PK `tx_id` is a stable synthetic id. */
   anthropic_message_id?: string | null;
+  /** Last user-role message text (prose + tool_result content). Populated on finalize;
+   *  indexed by FTS5 and embedded for Vectorize. */
+  user_text?: string | null;
+  /** Concatenated assistant text_delta stream output — excludes thinking + tool args. */
+  assistant_text?: string | null;
 };
 
 export type Stats = {

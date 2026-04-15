@@ -206,9 +206,11 @@ dependencies = [
  "hex",
  "js-sys",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "sha2",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "worker",
  "worker-macros",
 ]
