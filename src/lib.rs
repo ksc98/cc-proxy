@@ -1429,17 +1429,26 @@ async fn call_js_method(
 }
 
 /// Call Workers AI to produce a 768-dim embedding for `text`. Returns None
-/// on any error — callers treat Vectorize indexing as best-effort.
+/// on any error — callers treat Vectorize indexing as best-effort. Each
+/// failure mode logs a distinct `embed_err` sub-kind so the root cause is
+/// visible in `wrangler tail` without recompiling.
 async fn embed_text(env: &Env, text: &str) -> Option<Vec<f32>> {
     if text.is_empty() {
         return None;
     }
-    let ai = env.ai("AI").ok()?;
+    let ai = match env.ai("AI") {
+        Ok(a) => a,
+        Err(e) => {
+            console_log!(
+                "{{\"dir\":\"embed_err\",\"stage\":\"binding\",\"err\":\"{}\"}}",
+                e
+            );
+            return None;
+        }
+    };
     let trimmed = if text.len() <= EMBED_INPUT_CAP {
         text
     } else {
-        // Keep the tail — front of a replayed turn is often boilerplate,
-        // while the new prompt + assistant output live near the end.
         let start = text.len() - EMBED_INPUT_CAP;
         let mut s = start;
         while s < text.len() && !text.is_char_boundary(s) {
@@ -1447,11 +1456,42 @@ async fn embed_text(env: &Env, text: &str) -> Option<Vec<f32>> {
         }
         &text[s..]
     };
-    let input = json!({ "text": trimmed });
-    let out: serde_json::Value = ai.run(EMBED_MODEL, input).await.ok()?;
-    // Shape: { shape: [1, 768], data: [[...768 floats...]], pooling: "mean" }
-    let row = out.get("data")?.as_array()?.first()?.as_array()?;
+    // Workers AI expects a plain JS object. `serde_json::Value::Object` gets
+    // serialized as a JS Map by serde-wasm-bindgen (worker-rs wraps that
+    // under the hood), which the AiError: 5006 validator silently rejects.
+    // A #[derive(Serialize)] struct serializes as a plain object, which
+    // matches the model's {text: string} schema.
+    #[derive(Serialize)]
+    struct EmbedInput<'a> {
+        text: &'a str,
+    }
+    let input = EmbedInput { text: trimmed };
+    let out: serde_json::Value = match ai.run(EMBED_MODEL, input).await {
+        Ok(v) => v,
+        Err(e) => {
+            console_log!(
+                "{{\"dir\":\"embed_err\",\"stage\":\"run\",\"err\":\"{:?}\"}}",
+                e
+            );
+            return None;
+        }
+    };
+    let row = match out.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()).and_then(|f| f.as_array()) {
+        Some(r) => r,
+        None => {
+            console_log!(
+                "{{\"dir\":\"embed_err\",\"stage\":\"shape\",\"body\":{}}}",
+                out
+            );
+            return None;
+        }
+    };
     if row.len() != EMBED_DIMS {
+        console_log!(
+            "{{\"dir\":\"embed_err\",\"stage\":\"dims\",\"got\":{},\"want\":{}}}",
+            row.len(),
+            EMBED_DIMS
+        );
         return None;
     }
     Some(
@@ -1474,18 +1514,30 @@ async fn vectorize_upsert(
         .map_err(|e| format!("binding: {e}"))?;
 
     // id prefix enforces isolation even if the metadata filter is ever misconfigured.
-    let id = format!("{}:{}", user_hash, tx_id);
-    let metadata = json!({
-        "user_hash": user_hash,
-        "session_id": session_id.unwrap_or(""),
-        "ts": ts,
-    });
-    let record = json!({
-        "id": id,
-        "values": values,
-        "metadata": metadata,
-    });
-    let vectors = serde_json::Value::Array(vec![record]);
+    // Use #[derive(Serialize)] structs so serde-wasm-bindgen emits plain JS
+    // objects (not Maps) — Vectorize's validator chokes on the latter.
+    #[derive(Serialize)]
+    struct Metadata<'a> {
+        user_hash: &'a str,
+        session_id: &'a str,
+        ts: i64,
+    }
+    #[derive(Serialize)]
+    struct VectorRecord<'a> {
+        id: String,
+        values: &'a [f32],
+        metadata: Metadata<'a>,
+    }
+    let record = VectorRecord {
+        id: format!("{}:{}", user_hash, tx_id),
+        values,
+        metadata: Metadata {
+            user_hash,
+            session_id: session_id.unwrap_or(""),
+            ts,
+        },
+    };
+    let vectors = vec![record];
     let arg = serde_wasm_bindgen::to_value(&vectors).map_err(|e| format!("encode: {e}"))?;
 
     call_js_method(&vec_binding.0, "upsert", &[arg])
@@ -1507,11 +1559,23 @@ async fn vectorize_query(
 
     let values: Vec<f64> = query_vec.iter().map(|&x| x as f64).collect();
     let q_arg = serde_wasm_bindgen::to_value(&values).map_err(|e| format!("encode q: {e}"))?;
-    let opts = json!({
-        "topK": top_k,
-        "filter": { "user_hash": user_hash },
-        "returnMetadata": "all",
-    });
+    #[derive(Serialize)]
+    struct Filter<'a> {
+        user_hash: &'a str,
+    }
+    #[derive(Serialize)]
+    struct QueryOpts<'a> {
+        #[serde(rename = "topK")]
+        top_k: usize,
+        filter: Filter<'a>,
+        #[serde(rename = "returnMetadata")]
+        return_metadata: &'static str,
+    }
+    let opts = QueryOpts {
+        top_k,
+        filter: Filter { user_hash },
+        return_metadata: "all",
+    };
     let opts_arg = serde_wasm_bindgen::to_value(&opts).map_err(|e| format!("encode opts: {e}"))?;
 
     let raw = call_js_method(&vec_binding.0, "query", &[q_arg, opts_arg])

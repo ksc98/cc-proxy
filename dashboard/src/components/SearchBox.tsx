@@ -130,18 +130,20 @@ export function SearchBox() {
       </header>
 
       <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
+        <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
         <Input
           ref={inputRef}
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search across everything — function names, error messages, topics…"
+          placeholder="Search sessions, prompts, responses…"
           autoComplete="off"
           spellCheck={false}
-          className="h-10 pl-9 pr-14 text-sm"
+          className="h-11 pl-10 pr-12 text-sm"
         />
-        <Kbd className="absolute right-3 top-1/2 -translate-y-1/2">/</Kbd>
+        <Kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 h-6 px-2 text-[11px] font-medium">
+          /
+        </Kbd>
       </div>
 
       <ResultsPanel state={state} mode={mode} query={query.trim()} />
@@ -361,7 +363,7 @@ function Kbd({
   return (
     <kbd
       className={cn(
-        "pointer-events-none inline-flex h-5 select-none items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-card)] px-1.5 font-mono text-[10px] text-[var(--color-subtle-foreground)]",
+        "pointer-events-none inline-flex h-5 select-none items-center justify-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1.5 font-mono text-[10px] text-[var(--color-muted-foreground)]",
         className,
       )}
     >
