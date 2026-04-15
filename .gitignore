@@ -9,6 +9,11 @@ node_modules/
 .env.local
 .dev.vars
 
+# Generated from *.template or wrangler config substitution.
+wrangler.deploy.toml
+wrangler.deploy.jsonc
+dashboard/wrangler.deploy.jsonc
+
 # Astro build artifacts
 dashboard/dist/
 dashboard/.astro/

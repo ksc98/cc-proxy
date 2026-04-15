@@ -6,11 +6,13 @@
   "workers_dev": false,
   "preview_urls": false,
 
-  // Custom domain is injected at deploy time from $DOMAIN (see justfile)
-  // so the public repo stays deployment-agnostic. CF Access (Google IdP)
-  // is configured on the deployed hostname in Zero Trust, with path
-  // Bypass rules for /v1/* and /_cm/* so the proxy stays reachable to
-  // Claude Code clients that can't do Google sign-in.
+  // __DOMAIN__ is substituted at deploy time from $DOMAIN (see justfile)
+  // so the public repo stays deployment-agnostic. custom_domain: true
+  // auto-provisions DNS + edge TLS for the apex. CF Access gates the
+  // hostname in Zero Trust, with Bypass rules for /v1/* and /_cm/*.
+  "routes": [
+    { "pattern": "__DOMAIN__", "custom_domain": true }
+  ],
 
   // Bind to the UserStore DO class hosted inside the cc-proxy worker.
   // script_name makes this a cross-worker binding: we get a stub into
