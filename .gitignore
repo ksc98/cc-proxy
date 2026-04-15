@@ -17,3 +17,6 @@ dashboard/wrangler.deploy.jsonc
 # Astro build artifacts
 dashboard/dist/
 dashboard/.astro/
+
+# Local agent state (Claude Code worktrees, settings, etc.)
+.claude/
