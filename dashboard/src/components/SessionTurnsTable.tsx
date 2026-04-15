@@ -15,6 +15,7 @@ import {
   Loader2,
   SlidersHorizontal,
   Search,
+  Sparkles,
 } from "lucide-react";
 import {
   Table,
