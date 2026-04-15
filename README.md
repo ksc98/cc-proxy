@@ -1,4 +1,4 @@
-# cc-proxy
+# claudemetry
 
 A Cloudflare Worker, written in Rust, that proxies requests to the Anthropic API and records a structured row for every transaction into a **per-user SQLite database** (Durable Object with native SQL storage). Point `ANTHROPIC_BASE_URL` at it and every Claude Code (or Anthropic SDK) request becomes queryable, per account, forever.
 
@@ -14,9 +14,10 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
   ┌──────────────────────────────────────────────┐
   │  cc-proxy (Rust Worker)                      │
   │                                              │
-  │   identify         →  user_hash =            │
-  │                        sha256(salt ‖ JWT.sub)│
-  │                        truncate 8 bytes      │
+  │   identify         →  GET /oauth/profile     │
+  │                        (cached in KV, 1h TTL)│
+  │                        user_hash =           │
+  │                        sha256(salt ‖ uuid)[:8]│
   │                                              │
   │   forward          →  streaming response     │──► client
   │                                              │
@@ -91,6 +92,13 @@ openssl rand -hex 16 | npx wrangler secret put HASH_SALT
 
 If unset, the worker falls back to a published dev salt and emits hashes that aren't safe to publish.
 
+Both workers share a single KV namespace (binding name `SESSION`) for the OAuth-profile cache (`tok:<token_id>`) and the email→hash link (`link:<email>`). Create one and paste the id into both `wrangler.toml` and `dashboard/wrangler.jsonc`:
+
+```bash
+npx wrangler kv namespace create claudemetry-session
+# copy the id into the [[kv_namespaces]] block in both configs
+```
+
 Then point your client at whichever URL you ended up with:
 
 ```bash
@@ -107,17 +115,23 @@ or in the Cloudflare dashboard (observability + traces are enabled in `wrangler.
 
 ## Identity: how user_hash is derived
 
-Every request carries either an OAuth Bearer token (the usual Claude Code case) or an `x-api-key`. The proxy computes:
+Every request carries either an OAuth Bearer token (the usual Claude Code case) or an `x-api-key`. The proxy resolves both to a stable identity:
 
 ```
-if   Bearer present  →  base64url-decode the JWT middle segment, take the "sub" claim
-if   x-api-key only  →  use the raw key
+if   Bearer (OAuth)  →  GET https://api.anthropic.com/api/oauth/profile
+                         (cached in KV under tok:<token_id>, TTL 1h)
+                         user_hash = hex(sha256(SALT ‖ "uuid:" ‖ account.uuid))[:16]
+
+if   x-api-key       →  user_hash = hex(sha256(SALT ‖ "apikey:" ‖ key))[:16]
+
 else                  →  skip persistence
-
-user_hash = hex(sha256(HASH_SALT ‖ identity))[:16]
 ```
 
-The `sub` claim is the Anthropic account identifier and does **not** change when the Bearer wrapper refreshes, so a user's `user_hash` is stable across token rotations, devices, and months of use. Two Anthropic accounts produce two different hashes and two different Durable Objects. The raw token is never stored or logged.
+Anthropic's `account.uuid` is immutable per-account, so `user_hash` is genuinely stable across OAuth refreshes, devices, and months of use. The first request after a token refresh costs one ~150 ms profile fetch; everything after hits the KV cache. Two Anthropic accounts always produce two different hashes (and two different Durable Objects). The raw bearer is never stored or logged.
+
+As a side-effect, every resolved request writes `link:<email> = user_hash` into the same KV namespace. The dashboard (gated by Cloudflare Access on the same email) reads that link to auto-scope itself to your DO — no `/setup` page, no copy-pasting.
+
+If the profile endpoint is unreachable (transient outage, rate limit), the proxy falls back to a `raw:`-prefixed token hash. That hash will diverge on the next OAuth refresh, but self-heals as soon as a profile fetch succeeds again.
 
 ## Persistence: the `transactions` table
 
@@ -146,7 +160,7 @@ Indexed on `ts DESC` and `(session_id, ts)`.
 
 ## Admin probes
 
-Three endpoints let you verify the pipeline without a dashboard. All three are scoped to **your own** `user_hash` by the auth header you present:
+A handful of endpoints let you verify the pipeline without a dashboard. All are scoped to **your own** `user_hash` (resolved from your bearer / api-key) unless explicitly overridden:
 
 ```bash
 # Your stable user_hash for this deployment
@@ -155,11 +169,32 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/whoami
 # Aggregate counts + token totals from your DO's SQLite
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/stats
 
-# Last 100 raw rows from your DO
+# All raw rows from your DO (newest first)
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/recent
+
+# Generic SQL exec — backs `burnage shell`. Optional `hash` overrides the
+# target DO (used for cross-DO inspection / data migration).
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/admin/sql \
+  -d '{"sql":"SELECT model, COUNT(*) AS n FROM transactions GROUP BY model"}'
 ```
 
-These are internal endpoints intended to be replaced by a proper web dashboard later. They never expose another user's data — the hash is always derived from the caller's own token.
+These are bearer-gated and never cross identities unless you ask via `hash`.
+
+## `burnage shell`
+
+Interactive SQL REPL + headless executor over `/_cm/admin/sql`. Built on crossterm — no readline, comfy-table, or rustyline pull-ins.
+
+```bash
+burnage shell                          # REPL against your own DO
+burnage shell --hash 0203addab2792724  # REPL against another DO (admin)
+burnage shell -c "SELECT COUNT(*) FROM transactions"
+burnage shell -f migrate.sql
+echo "SELECT model FROM transactions" | burnage shell
+```
+
+Output auto-detects: pretty table on a tty, JSON when stdout is piped. Override with `--format {table,json,tsv}`.
+
+REPL niceties: history at `~/.cache/burnage/shell_history`, arrow-key navigation, Home/End/Ctrl-A/E/U/K/L, Ctrl-C cancels current input, Ctrl-D exits on empty buffer. Dot commands: `.tables`, `.schema [name]`, `.hash <16-hex>|-`, `.whoami`, `.quit`.
 
 ## What gets logged (console)
 

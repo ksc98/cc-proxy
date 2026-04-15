@@ -27,6 +27,15 @@
     ]
   },
 
+  // Shared with the proxy worker. The proxy writes link:<email> on every
+  // resolved request; the dashboard reads it here to scope to the right DO.
+  "kv_namespaces": [
+    {
+      "binding": "SESSION",
+      "id": "0217e705fa5f4ce7843f7ce7cbcf4f10"
+    }
+  ],
+
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "invocation_logs": true },
