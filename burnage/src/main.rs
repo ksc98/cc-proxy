@@ -3,6 +3,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod backfill;
 mod quota;
 mod search;
 mod shell;
@@ -52,6 +53,18 @@ enum Cmd {
     Turn(TurnArgs),
     /// SQL shell against any DO via /_cm/admin/sql.
     Shell(ShellArgs),
+    /// Re-embed every historical turn and upsert it into your Vectorize
+    /// namespace. Idempotent; safe to re-run. Needed one-off after the
+    /// namespace migration for vectors that predate it.
+    VectorizeBackfill(BackfillArgs),
+}
+
+#[derive(clap::Args)]
+struct BackfillArgs {
+    /// Rows per DO call. Larger = fewer round-trips but longer per-call
+    /// latency. Clamped server-side to [1, 200].
+    #[arg(long, default_value_t = 50)]
+    batch_size: i64,
 }
 
 #[derive(clap::Args)]
@@ -191,6 +204,15 @@ fn main() -> Result<()> {
                 command: args.command,
                 file: args.file,
                 format: args.format,
+            });
+        }
+        Cmd::VectorizeBackfill(args) => {
+            let token = read_token()?;
+            let base = resolve_base(url_opt.as_deref())?.to_string();
+            return backfill::run(backfill::BackfillOpts {
+                base,
+                token,
+                batch_size: args.batch_size,
             });
         }
         Cmd::Whoami => (Method::Get, "/_cm/whoami"),
