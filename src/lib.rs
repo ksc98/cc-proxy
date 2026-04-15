@@ -309,6 +309,13 @@ async fn admin_route(
         return handle_search(&user_hash, &forwarded_body, env).await;
     }
 
+    // Backfill re-embeds every finalized turn in the caller's DO and upserts
+    // it under `namespace=<user_hash>`. Needed one-off when vectors predate
+    // the namespace migration; safe to re-run (upsert is idempotent on id).
+    if path == "/_cm/admin/vectorize-backfill" && method == &Method::Post {
+        return handle_vectorize_backfill(&user_hash, &forwarded_body, env).await;
+    }
+
     let (inner_method, inner_path) = match (method, path) {
         (&Method::Get, "/_cm/recent") => (Method::Get, "/recent"),
         (&Method::Get, "/_cm/stats") => (Method::Get, "/stats"),
@@ -423,6 +430,7 @@ impl DurableObject for UserStore {
             (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
             (Method::Post, "/search") => self.search(&mut req).await,
             (Method::Post, "/turn") => self.fetch_turn(&mut req).await,
+            (Method::Post, "/vectorize/backfill") => self.vectorize_backfill(&mut req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -898,10 +906,10 @@ impl UserStore {
         }
     }
 
-    // Vector branch: embed the query via Workers AI, hit Vectorize with the
-    // caller's user_hash as a metadata filter, hydrate the returned tx_ids.
-    // Returns an empty vec (never an error) when user_hash is missing —
-    // semantic search simply isn't available in that case, which is a
+    // Vector branch: embed the query via Workers AI, hit Vectorize scoped to
+    // the caller's user_hash namespace, hydrate the returned tx_ids. Returns
+    // an empty vec (never an error) when user_hash is missing — semantic
+    // search simply isn't available in that case, which is a
     // degraded-but-functional state (FTS still works).
     async fn vector_search(
         &self,
@@ -928,6 +936,116 @@ impl UserStore {
         }
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         Ok(hits)
+    }
+
+    // Paginated re-embed/re-upsert of the caller's historical turns into the
+    // Vectorize namespace. Pulls rows with ts < before_ts (DESC order), stops
+    // at batch_size, and returns `next_before_ts` so clients can loop until
+    // `done: true`. Embedding + upsert are both idempotent on tx_id, so re-
+    // running a partially-completed batch is safe.
+    async fn vectorize_backfill(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            user_hash: String,
+            #[serde(default)]
+            batch_size: Option<i64>,
+            #[serde(default)]
+            before_ts: Option<i64>,
+        }
+        let b: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if b.user_hash.trim().is_empty() {
+            return Response::error("missing user_hash", 400);
+        }
+        let user_hash = b.user_hash;
+        let batch_size = b.batch_size.unwrap_or(50).clamp(1, 200);
+        let before_ts = b.before_ts.unwrap_or(i64::MAX);
+
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT tx_id, session_id, ts, user_text, assistant_text
+             FROM transactions
+             WHERE ts < ?
+               AND (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, ''))) > 3
+             ORDER BY ts DESC
+             LIMIT ?",
+            Some(vec![before_ts.into(), batch_size.into()]),
+        )?;
+        let rows: Vec<serde_json::Value> = cursor.to_array().unwrap_or_default();
+
+        let scanned = rows.len() as i64;
+        let mut upserted = 0i64;
+        let mut skipped_empty = 0i64;
+        let mut embed_errors = 0i64;
+        let mut upsert_errors = 0i64;
+        let mut oldest_ts = before_ts;
+
+        for row in &rows {
+            let tx_id = row
+                .get("tx_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let session_id = row
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let ts = row.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+            if ts < oldest_ts {
+                oldest_ts = ts;
+            }
+            let ut = row.get("user_text").and_then(|v| v.as_str()).unwrap_or("");
+            let at = row
+                .get("assistant_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let combined = format!("{}\n---\n{}", ut, at);
+            if combined.trim().len() <= 3 {
+                skipped_empty += 1;
+                continue;
+            }
+            match embed_text(&self.env, &combined).await {
+                Some(vec) => {
+                    match vectorize_upsert(
+                        &self.env,
+                        &user_hash,
+                        &tx_id,
+                        session_id.as_deref(),
+                        ts,
+                        &vec,
+                    )
+                    .await
+                    {
+                        Ok(()) => upserted += 1,
+                        Err(_) => upsert_errors += 1,
+                    }
+                }
+                None => embed_errors += 1,
+            }
+        }
+
+        // "done" when the SELECT returned less than a full batch — no older
+        // rows remain to page over. Caller re-invokes with next_before_ts
+        // until this flips true.
+        let done = scanned < batch_size;
+        let next_before_ts = if done {
+            serde_json::Value::Null
+        } else {
+            json!(oldest_ts)
+        };
+
+        Response::from_json(&json!({
+            "scanned": scanned,
+            "upserted": upserted,
+            "skipped_empty": skipped_empty,
+            "embed_errors": embed_errors,
+            "upsert_errors": upsert_errors,
+            "oldest_ts": oldest_ts,
+            "next_before_ts": next_before_ts,
+            "done": done,
+        }))
     }
 
     // Fixed 60s window, 120 requests/min/user. Counter lives in the DO's
@@ -1671,6 +1789,32 @@ async fn handle_search(user_hash: &str, body: &[u8], env: &Env) -> Result<Respon
     headers.append("content-type", "application/json").ok();
     init.with_headers(headers);
     let req = Request::new_with_init("https://store/search", &init)?;
+    stub.fetch_with_request(req).await
+}
+
+// Forwarder for the one-off re-embed/re-upsert of historical turns. Body
+// mirrors the DO's `/vectorize/backfill` schema (`batch_size`, `before_ts`);
+// we inject the resolved `user_hash` the same way `handle_search` does.
+async fn handle_vectorize_backfill(user_hash: &str, body: &[u8], env: &Env) -> Result<Response> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).unwrap_or(json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("user_hash".into(), json!(user_hash));
+    } else {
+        v = json!({ "user_hash": user_hash });
+    }
+    let augmented = serde_json::to_vec(&v).unwrap_or_default();
+
+    let ns = env.durable_object("USER_STORE")?;
+    let stub = ns.id_from_name(user_hash)?.get_stub()?;
+
+    let arr = Uint8Array::from(&augmented[..]);
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    let headers = Headers::new();
+    headers.append("content-type", "application/json").ok();
+    init.with_headers(headers);
+    let req = Request::new_with_init("https://store/vectorize/backfill", &init)?;
     stub.fetch_with_request(req).await
 }
 
