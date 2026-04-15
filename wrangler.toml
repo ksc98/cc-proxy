@@ -24,6 +24,13 @@ class_name = "UserStore"
 tag = "v1"
 new_sqlite_classes = ["UserStore"]
 
+# Shared with the dashboard worker. Keys are namespaced by prefix:
+#   tok:<token_id>     bearer → "{uuid}|{email}", TTL 1h (auth cache)
+#   link:<email>       CF Access email → user_hash (dashboard scoping)
+[[kv_namespaces]]
+binding = "SESSION"
+id = "0217e705fa5f4ce7843f7ce7cbcf4f10"
+
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
 
