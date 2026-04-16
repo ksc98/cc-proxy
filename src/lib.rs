@@ -39,9 +39,18 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     let req_body_bytes = req.bytes().await.unwrap_or_default();
     let req_body_len = req_body_bytes.len() as i64;
 
-    let user_hash = compute_user_hash(&req_headers_vec, &salt, &env)
-        .await
-        .map(|(h, _email, _legacy)| h);
+    // The /v1/* proxy path is the ONLY place that registers the caller as
+    // "known to this deployment" (link:<email> → user_hash in KV). Admin
+    // routes (/_cm/*) check that link to decide whether to respond, so a
+    // stranger with a valid Anthropic token can't hit /_cm/user-count or
+    // anything else until they've first proxied real traffic here.
+    let identity = compute_user_hash(&req_headers_vec, &salt, &env).await;
+    if let Some((hash, Some(email), _)) = &identity {
+        if let Ok(kv) = env.kv("SESSION") {
+            auto_link(&kv, email, hash).await;
+        }
+    }
+    let user_hash = identity.map(|(h, _email, _legacy)| h);
     let session_id = header_value(&req_headers_vec, "x-claude-code-session-id");
 
     // Quick request log line (kept for tail visibility).
@@ -288,6 +297,26 @@ async fn admin_route(
         Some(t) => t,
         None => return Response::error("missing authorization", 401),
     };
+
+    // Proxy-first gate: every /_cm/* response requires that the caller has
+    // previously sent at least one /v1/* request through this deployment
+    // (which writes `link:<email>` as a side-effect). Without that, an
+    // attacker holding any valid Anthropic token could still hit admin
+    // routes and see counts / try cross-DO reads. With it, the attacker
+    // also needs to have previously used this specific proxy — at which
+    // point they've already revealed themselves and their own data is
+    // the only thing at risk. api-key callers (no email) get no link and
+    // are therefore locked out of /_cm/* entirely.
+    let is_registered = match email.as_deref() {
+        Some(em) => caller_has_link(env, em).await,
+        None => false,
+    };
+    if !is_registered {
+        return Response::error(
+            "proxy-first access required: send a /v1/* request through this deployment first",
+            403,
+        );
+    }
 
     if path == "/_cm/whoami" {
         return Response::from_json(&json!({
@@ -2346,7 +2375,6 @@ async fn resolve_oauth_hash(
             if let Some((uuid, email)) = cached.split_once('|') {
                 let hash = hash_identity(salt, "email:", email);
                 let legacy = hash_identity(salt, "uuid:", uuid);
-                auto_link(&kv, email, &hash).await;
                 return Some((hash, Some(email.to_string()), Some(legacy)));
             }
         }
@@ -2359,7 +2387,6 @@ async fn resolve_oauth_hash(
             }
             let hash = hash_identity(salt, "email:", &email);
             let legacy = hash_identity(salt, "uuid:", &uuid);
-            auto_link(&kv, &email, &hash).await;
             return Some((hash, Some(email), Some(legacy)));
         }
     }
@@ -2410,4 +2437,20 @@ async fn auto_link(kv: &KvStore, email: &str, hash: &str) {
     if let Ok(builder) = kv.put(&key, hash) {
         let _ = builder.execute().await;
     }
+}
+
+// "Has this caller's email ever been registered via a /v1/* proxy hit?"
+// The `link:<email>` key is written by auto_link only from the main proxy
+// path, so existence here == "they've sent real traffic to this
+// deployment." Admin routes gate on this.
+async fn caller_has_link(env: &Env, email: &str) -> bool {
+    let email_norm = email.trim().to_lowercase();
+    if email_norm.is_empty() {
+        return false;
+    }
+    let Ok(kv) = env.kv("SESSION") else {
+        return false;
+    };
+    let key = format!("link:{}", email_norm);
+    matches!(kv.get(&key).text().await, Ok(Some(_)))
 }
