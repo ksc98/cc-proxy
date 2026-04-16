@@ -1056,6 +1056,7 @@ impl UserStore {
                 COALESCE(SUM(cache_creation_1h), 0) AS cache_creation_1h,
                 COALESCE(SUM(
                     CASE model
+                        WHEN 'claude-opus-4-7' THEN (input_tokens*5.0 + output_tokens*25.0 + cache_read*0.5 + cache_creation*6.25) / 1000000.0
                         WHEN 'claude-opus-4-6' THEN (input_tokens*5.0 + output_tokens*25.0 + cache_read*0.5 + cache_creation*6.25) / 1000000.0
                         WHEN 'claude-opus-4-5' THEN (input_tokens*5.0 + output_tokens*25.0 + cache_read*0.5 + cache_creation*6.25) / 1000000.0
                         WHEN 'claude-opus-4-1' THEN (input_tokens*15.0 + output_tokens*75.0 + cache_read*1.5 + cache_creation*18.75) / 1000000.0

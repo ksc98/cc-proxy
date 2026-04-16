@@ -1,6 +1,7 @@
 // Model pricing per 1M tokens (USD). Source: platform.claude.com/docs/en/about-claude/pricing
 // cacheRead = 0.1x base input; cacheWrite5m = 1.25x base input.
 const PRICING: Record<string, { in: number; out: number; cacheRead: number; cacheWrite5m: number }> = {
+  "claude-opus-4-7":            { in: 5,    out: 25,   cacheRead: 0.50, cacheWrite5m: 6.25  },
   "claude-opus-4-6":            { in: 5,    out: 25,   cacheRead: 0.50, cacheWrite5m: 6.25  },
   "claude-opus-4-5":            { in: 5,    out: 25,   cacheRead: 0.50, cacheWrite5m: 6.25  },
   "claude-opus-4-1":            { in: 15,   out: 75,   cacheRead: 1.50, cacheWrite5m: 18.75 },
