@@ -51,6 +51,11 @@ export type Stats = {
   cache_creation: number;
   first_ts: number | null;
   last_ts: number | null;
+  sessions: number;
+  total_elapsed_ms: number;
+  cache_creation_5m: number;
+  cache_creation_1h: number;
+  estimated_cost_usd: number;
 };
 
 /** One row per (session_id, model) returned by /sessions/summary. */

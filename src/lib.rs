@@ -960,7 +960,31 @@ impl UserStore {
                 COALESCE(SUM(req_body_bytes), 0) AS req_bytes,
                 COALESCE(SUM(resp_body_bytes), 0) AS resp_bytes,
                 MIN(ts) AS first_ts,
-                MAX(ts) AS last_ts
+                MAX(ts) AS last_ts,
+                COUNT(DISTINCT session_id) AS sessions,
+                COALESCE(SUM(elapsed_ms), 0) AS total_elapsed_ms,
+                COALESCE(SUM(cache_creation_5m), 0) AS cache_creation_5m,
+                COALESCE(SUM(cache_creation_1h), 0) AS cache_creation_1h,
+                COALESCE(SUM(
+                    CASE model
+                        WHEN 'claude-opus-4-6' THEN (input_tokens*5.0 + output_tokens*25.0 + cache_read*0.5 + cache_creation*6.25) / 1000000.0
+                        WHEN 'claude-opus-4-5' THEN (input_tokens*5.0 + output_tokens*25.0 + cache_read*0.5 + cache_creation*6.25) / 1000000.0
+                        WHEN 'claude-opus-4-1' THEN (input_tokens*15.0 + output_tokens*75.0 + cache_read*1.5 + cache_creation*18.75) / 1000000.0
+                        WHEN 'claude-opus-4' THEN (input_tokens*15.0 + output_tokens*75.0 + cache_read*1.5 + cache_creation*18.75) / 1000000.0
+                        WHEN 'claude-sonnet-4-6' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-sonnet-4-5' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-sonnet-4' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-sonnet-4-5-20241022' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-3-5-sonnet-20241022' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-3-5-sonnet-20240620' THEN (input_tokens*3.0 + output_tokens*15.0 + cache_read*0.3 + cache_creation*3.75) / 1000000.0
+                        WHEN 'claude-haiku-4-5-20251001' THEN (input_tokens*1.0 + output_tokens*5.0 + cache_read*0.1 + cache_creation*1.25) / 1000000.0
+                        WHEN 'claude-haiku-4-5' THEN (input_tokens*1.0 + output_tokens*5.0 + cache_read*0.1 + cache_creation*1.25) / 1000000.0
+                        WHEN 'claude-3-5-haiku-20241022' THEN (input_tokens*1.0 + output_tokens*5.0 + cache_read*0.1 + cache_creation*1.25) / 1000000.0
+                        WHEN 'claude-3-opus-20240229' THEN (input_tokens*15.0 + output_tokens*75.0 + cache_read*1.5 + cache_creation*18.75) / 1000000.0
+                        WHEN 'claude-3-haiku-20240307' THEN (input_tokens*0.25 + output_tokens*1.25 + cache_read*0.03 + cache_creation*0.3) / 1000000.0
+                        ELSE 0
+                    END
+                ), 0) AS estimated_cost_usd
              FROM transactions WHERE ts >= ?",
             Some(vec![since.into()]),
         )?;
