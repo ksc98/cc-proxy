@@ -16,7 +16,6 @@ function shortSession(id: string): string {
   return id.slice(0, 8);
 }
 
-const POLL_MS = 5_000;
 
 export function Sidebar({
   sessions: initialSessions,
@@ -47,7 +46,7 @@ export function Sidebar({
     return () => window.clearInterval(id);
   }, []);
 
-  // Poll /api/sessions.json to keep the list live.
+  // Refresh session list on WS events (turn complete / session end).
   React.useEffect(() => {
     let cancelled = false;
     let inflight = false;
@@ -63,19 +62,21 @@ export function Sidebar({
         const data = (await res.json()) as SessionSummary[];
         if (!cancelled && Array.isArray(data)) setSessions(data);
       } catch {
-        /* next tick will retry */
+        /* next event will retry */
       } finally {
         inflight = false;
       }
     };
-    const id = window.setInterval(tick, POLL_MS);
+    window.addEventListener("cm:turn-complete", tick);
+    window.addEventListener("cm:session-end", tick);
     const onVis = () => {
       if (!document.hidden) void tick();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.removeEventListener("cm:turn-complete", tick);
+      window.removeEventListener("cm:session-end", tick);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);

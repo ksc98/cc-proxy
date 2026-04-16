@@ -112,25 +112,17 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         let id = ns.id_from_name(uh).ok()?;
         id.get_stub().ok()
     };
-    let placeholder_stub = acquire_stub();
-    let finalize_stub = acquire_stub();
+    let broadcast_stub = acquire_stub();
+    let ingest_stub = acquire_stub();
 
-    // Fire the placeholder write BEFORE awaiting upstream. Runs in the
-    // background alongside the upstream fetch, so the dashboard sees an
-    // in_flight=1 row within one DO round-trip of the request arriving —
-    // even if the upstream takes 30s to finish streaming.
-    //
-    // Extract request-side knobs (model, max_tokens, thinking_budget,
-    // declared tools, last user message) so the dashboard has something
-    // to render while the turn is mid-flight. Finalize overwrites this
-    // row with SSE-derived authoritative values.
-    if let Some(stub) = placeholder_stub {
-        let placeholder_tx = placeholder_tx_id.clone();
-        let placeholder_session = session_id.clone();
-        let placeholder_method = method.to_string();
-        let placeholder_url = target.clone();
-        let placeholder_body = req_body_bytes.clone();
-        let placeholder_len = req_body_len;
+    // Broadcast turn-start to connected WS clients so the dashboard can
+    // show a spinner. This is NOT a database write — if the worker dies,
+    // the virtual in-flight row simply disappears from the client. No
+    // orphaned placeholder rows.
+    if let Some(stub) = broadcast_stub {
+        let start_tx = placeholder_tx_id.clone();
+        let start_session = session_id.clone();
+        let start_body = req_body_bytes.clone();
         ctx.wait_until(async move {
             let ParsedRequest {
                 model,
@@ -138,23 +130,18 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
                 thinking_budget,
                 tools_json,
                 user_text,
-            } = parse_request_body(&placeholder_body);
-            let placeholder = TransactionRecord {
-                tx_id: placeholder_tx,
-                ts: start,
-                session_id: placeholder_session,
-                method: placeholder_method,
-                url: placeholder_url,
-                req_body_bytes: placeholder_len,
-                in_flight: Some(1),
-                model,
-                max_tokens,
-                thinking_budget,
-                tools_json,
-                user_text,
-                ..Default::default()
-            };
-            post_record_to_do(&stub, "/ingest/start", &placeholder).await;
+            } = parse_request_body(&start_body);
+            let payload = json!({
+                "tx_id": start_tx,
+                "ts": start,
+                "session_id": start_session,
+                "model": model,
+                "tools_json": tools_json,
+                "user_text": user_text,
+                "thinking_budget": thinking_budget,
+                "max_tokens": max_tokens,
+            });
+            post_json_to_do(&stub, "/ws/turn-start", &payload).await;
         });
     }
 
@@ -266,8 +253,8 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         });
         console_log!("{}", log.to_string());
 
-        if let Some(stub) = finalize_stub {
-            post_record_to_do(&stub, "/ingest/finalize", &record).await;
+        if let Some(stub) = ingest_stub {
+            post_record_to_do(&stub, "/ingest", &record).await;
 
             // Best-effort Vectorize upsert. Failures are logged but never
             // block the SQLite finalize, which already succeeded above.
@@ -537,6 +524,27 @@ async fn post_record_to_do(
     }
 }
 
+/// Fire-and-forget JSON POST to a Durable Object endpoint (no DB write
+/// on the DO side for broadcast-only routes like /ws/turn-start).
+async fn post_json_to_do(
+    stub: &worker::durable::Stub,
+    path: &str,
+    payload: &serde_json::Value,
+) {
+    let body_json = match serde_json::to_string(payload) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let arr = Uint8Array::from(body_json.as_bytes());
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    let url = format!("https://store{}", path);
+    if let Ok(req) = Request::new_with_init(&url, &init) {
+        let _ = stub.fetch_with_request(req).await;
+    }
+}
+
 // ---------- Per-user Durable Object with SQLite ----------
 
 #[durable_object]
@@ -560,9 +568,9 @@ impl DurableObject for UserStore {
         let url = req.url()?;
         let path = url.path().to_string();
         match (req.method(), path.as_str()) {
+            (Method::Get, "/ws") => self.handle_ws_upgrade().await,
+            (Method::Post, "/ws/turn-start") => self.broadcast_turn_start(&mut req).await,
             (Method::Post, "/ingest") => self.ingest(&mut req).await,
-            (Method::Post, "/ingest/start") => self.ingest_start(&mut req).await,
-            (Method::Post, "/ingest/finalize") => self.ingest_finalize(&mut req).await,
             (Method::Post, "/session/end") => self.end_session(&mut req).await,
             (Method::Get, "/session/ends") => self.session_ends().await,
             (Method::Get, "/recent") => self.recent(&req).await,
@@ -578,6 +586,30 @@ impl DurableObject for UserStore {
             (Method::Post, "/migrate-in") => self.migrate_in(&mut req).await,
             _ => Response::error("not found", 404),
         }
+    }
+
+    async fn websocket_message(
+        &self,
+        _ws: WebSocket,
+        _message: WebSocketIncomingMessage,
+    ) -> Result<()> {
+        // No client→server messages needed yet.
+        Ok(())
+    }
+
+    async fn websocket_close(
+        &self,
+        _ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _was_clean: bool,
+    ) -> Result<()> {
+        // Runtime auto-removes the socket from get_websockets().
+        Ok(())
+    }
+
+    async fn websocket_error(&self, _ws: WebSocket, _error: worker::Error) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -747,17 +779,15 @@ impl UserStore {
                 None,
             );
         }
-        // Stale sweep: if a worker was evicted between /ingest/start and
-        // /ingest/finalize, the placeholder row would stay in_flight=1
-        // forever. On each fresh DO instance we flip anything older than
-        // 5 min to an error terminal state.
-        let cutoff = (Date::now().as_millis() as i64) - 300_000;
+        // One-time cleanup: mark any legacy in-flight placeholders as errors.
+        // With the WebSocket refactor, in-flight state is client-side only —
+        // no more placeholder rows. This sweep handles pre-refactor orphans.
         let _ = sql.exec(
             "UPDATE transactions
              SET in_flight = 0,
                  stop_reason = COALESCE(stop_reason, 'error')
-             WHERE in_flight = 1 AND ts < ?",
-            Some(vec![cutoff.into()]),
+             WHERE in_flight = 1",
+            None,
         );
         self.initialized.set(true);
     }
@@ -782,6 +812,32 @@ impl UserStore {
         Response::from_json(&serde_json::Value::Object(map))
     }
 
+    // ---------- WebSocket ----------
+
+    async fn handle_ws_upgrade(&self) -> Result<Response> {
+        let pair = WebSocketPair::new()?;
+        self.state.accept_web_socket(&pair.server);
+        Response::from_websocket(pair.client)
+    }
+
+    fn broadcast(&self, msg: &serde_json::Value) {
+        let text = msg.to_string();
+        for ws in self.state.get_websockets() {
+            let _ = ws.send_with_str(&text);
+        }
+    }
+
+    async fn broadcast_turn_start(&self, req: &mut Request) -> Result<Response> {
+        let payload: serde_json::Value = req.json().await?;
+        self.broadcast(&json!({
+            "type": "turn_start",
+            "data": payload,
+        }));
+        Response::ok("ok")
+    }
+
+    // ---------- Sessions ----------
+
     async fn end_session(&self, req: &mut Request) -> Result<Response> {
         #[derive(Deserialize)]
         struct Body {
@@ -799,45 +855,57 @@ impl UserStore {
             "INSERT OR REPLACE INTO session_ends (session_id, ended_at) VALUES (?, ?)",
             Some(vec![b.session_id.clone().into(), ended_at.into()]),
         )?;
+        self.broadcast(&json!({
+            "type": "session_end",
+            "data": { "session_id": b.session_id, "ended_at": ended_at }
+        }));
         Response::from_json(&json!({ "session_id": b.session_id, "ended_at": ended_at }))
     }
 
     async fn ingest(&self, req: &mut Request) -> Result<Response> {
         let r: TransactionRecord = req.json().await?;
         self.insert_or_replace(&r)?;
-        Response::ok("ok")
-    }
 
-    // Placeholder write fired from the proxy before the upstream fetch even
-    // returns. Row carries in_flight=1 and zeros/nulls for metric columns
-    // until /ingest/finalize lands.
-    async fn ingest_start(&self, req: &mut Request) -> Result<Response> {
-        let mut r: TransactionRecord = req.json().await?;
-        // Proxy sets in_flight=1, but belt-and-braces.
-        r.in_flight = Some(1);
-        // INSERT OR IGNORE so a retried /start doesn't clobber a finalize
-        // that somehow raced ahead of it.
-        self.insert_or_ignore(&r)?;
-        Response::ok("ok")
-    }
+        // Broadcast turn_complete to connected WS clients (list-view fields
+        // only — user_text/assistant_text are large and not needed).
+        self.broadcast(&json!({
+            "type": "turn_complete",
+            "data": {
+                "tx_id": r.tx_id,
+                "ts": r.ts,
+                "session_id": r.session_id,
+                "method": r.method,
+                "url": r.url,
+                "model": r.model,
+                "status": r.status,
+                "elapsed_ms": r.elapsed_ms,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cache_read": r.cache_read,
+                "cache_creation": r.cache_creation,
+                "stop_reason": r.stop_reason,
+                "tools_json": r.tools_json,
+                "req_body_bytes": r.req_body_bytes,
+                "resp_body_bytes": r.resp_body_bytes,
+                "cache_creation_5m": r.cache_creation_5m,
+                "cache_creation_1h": r.cache_creation_1h,
+                "thinking_budget": r.thinking_budget,
+                "thinking_blocks": r.thinking_blocks,
+                "max_tokens": r.max_tokens,
+                "rl_req_remaining": r.rl_req_remaining,
+                "rl_req_limit": r.rl_req_limit,
+                "rl_tok_remaining": r.rl_tok_remaining,
+                "rl_tok_limit": r.rl_tok_limit,
+                "in_flight": 0,
+                "anthropic_message_id": r.anthropic_message_id,
+            }
+        }));
 
-    // Finalize: overwrite the placeholder in-place (same synthetic tx_id).
-    // If the placeholder somehow never landed (worker eviction between
-    // /start and /finalize), INSERT OR REPLACE creates the row from
-    // scratch with the full payload.
-    async fn ingest_finalize(&self, req: &mut Request) -> Result<Response> {
-        let mut r: TransactionRecord = req.json().await?;
-        r.in_flight = Some(0);
-        self.insert_or_replace(&r)?;
         Response::ok("ok")
     }
 
     fn insert_or_replace(&self, r: &TransactionRecord) -> Result<()> {
         self.write_row("INSERT OR REPLACE", r)
-    }
-
-    fn insert_or_ignore(&self, r: &TransactionRecord) -> Result<()> {
-        self.write_row("INSERT OR IGNORE", r)
     }
 
     fn write_row(&self, verb: &str, r: &TransactionRecord) -> Result<()> {

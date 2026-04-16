@@ -7,7 +7,7 @@ import KpiCard from "@/components/KpiCard.astro";
 import Sparkline from "@/components/Sparkline.astro";
 import TokenChart from "@/components/TokenChart";
 import RecentTurnsTable from "@/components/RecentTurnsTable";
-import RowsPoller from "@/components/RowsPoller";
+import WsClient from "@/components/WsClient";
 import TimeWindowPill from "@/components/TimeWindowPill";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
@@ -209,7 +209,7 @@ const rateLimit =
   }}
   sessions={sessionList}
 >
-  <RowsPoller client:load intervalMs={1000} windowed={true} />
+  <WsClient client:load />
   <div class="mb-7 flex items-center justify-between gap-4 flex-wrap">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>

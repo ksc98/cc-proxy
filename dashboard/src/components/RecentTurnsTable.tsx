@@ -556,17 +556,19 @@ export default function RecentTurnsTable({
         const data = (await res.json()) as SessionSummary[];
         if (!cancelled && Array.isArray(data)) setSummaries(data);
       } catch {
-        /* next tick */
+        /* next event will retry */
       }
     };
-    const iv = window.setInterval(tick, 5000);
+    window.addEventListener("cm:turn-complete", tick);
+    window.addEventListener("cm:session-end", tick);
     const onVis = () => {
       if (!document.hidden) void tick();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelled = true;
-      window.clearInterval(iv);
+      window.removeEventListener("cm:turn-complete", tick);
+      window.removeEventListener("cm:session-end", tick);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);

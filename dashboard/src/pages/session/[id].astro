@@ -8,7 +8,7 @@ import MixBar from "@/components/MixBar.astro";
 import ToolFrequency from "@/components/ToolFrequency.astro";
 import SessionTimelineChart from "@/components/SessionTimelineChart";
 import SessionTurnsTable from "@/components/SessionTurnsTable";
-import RowsPoller from "@/components/RowsPoller";
+import WsClient from "@/components/WsClient";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
 import {
@@ -177,9 +177,9 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
   sessions={sessionList}
   currentSessionId={sessionId}
 >
-  <RowsPoller
+  <WsClient
     client:load
-    intervalMs={1000}
+    sessionId={sessionId}
     endpoint={`/api/session/turns?id=${encodeURIComponent(sessionId)}`}
   />
 

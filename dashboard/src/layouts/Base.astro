@@ -181,7 +181,6 @@ function fmtBurn(n: number): string {
       // Fetches the current page, parses, and swaps every [data-live-region]
       // block in place. The chart section is excluded so the React island
       // keeps its state.
-      const POLL_MS = 5_000;
       let polling = false;
       async function pollRefresh() {
         if (polling || document.hidden) return;
@@ -237,8 +236,16 @@ function fmtBurn(n: number): string {
           polling = false;
         }
       }
-      setInterval(pollRefresh, POLL_MS);
-      // Also refresh immediately on tab focus so you don't see stale data.
+      // Event-driven refresh: WsClient fires custom DOM events when turns
+      // complete or sessions end. Debounce to avoid hammering on bursts.
+      let debounceTimer: number | undefined;
+      function debouncedRefresh() {
+        clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(pollRefresh, 500);
+      }
+      window.addEventListener("cm:turn-complete", debouncedRefresh);
+      window.addEventListener("cm:session-end", debouncedRefresh);
+      // Also refresh on tab focus so you don't see stale data after switching back.
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) pollRefresh();
       });
