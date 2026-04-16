@@ -89,6 +89,7 @@ export default function WsClient({
             thinking_blocks: null,
             max_tokens: msg.data.max_tokens,
             tools_json: msg.data.tools_json ?? null,
+            tool_choice: msg.data.tool_choice ?? null,
             cache_creation_5m: null,
             cache_creation_1h: null,
             rl_req_remaining: null,
