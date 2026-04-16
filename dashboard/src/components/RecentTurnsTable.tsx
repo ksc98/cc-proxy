@@ -386,9 +386,24 @@ const columns: ColumnDef<UIRow>[] = [
     },
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
-      const raw: string[] = row.original.tx.tools_json
-        ? JSON.parse(row.original.tx.tools_json)
-        : [];
+      const tx = row.original.tx;
+
+      // In-flight: show tool_choice instead of the full available-tools list.
+      if (tx.in_flight === 1 && tx.tool_choice) {
+        const tc = tx.tool_choice;
+        const label = tc.startsWith("tool:")
+          ? shortToolName(tc.slice(5))
+          : tc; // "auto" or "any"
+        return (
+          <div className="flex flex-wrap gap-1 max-w-[22rem]">
+            <span className="chip opacity-60" title={`tool_choice: ${tc}`}>
+              {label}
+            </span>
+          </div>
+        );
+      }
+
+      const raw: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
       const tools = raw.map(shortToolName);
       if (tools.length === 0)
         return (

@@ -63,6 +63,7 @@ export default function TokenChart({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState<number>(0);
   const [rows, setRows] = useState<TransactionRow[]>(initialRows);
+  const baselineRef = useRef(initialRows);
   const height = 280;
 
   useEffect(() => {
@@ -78,7 +79,18 @@ export default function TokenChart({
     return () => ro.disconnect();
   }, []);
 
-  useEffect(() => subscribeRows(setRows), []);
+  // Merge WS-pushed rows into the SSR baseline so the chart keeps showing
+  // the full pill-windowed dataset instead of only live rows.
+  useEffect(
+    () =>
+      subscribeRows((busRows) => {
+        const byId = new Map<string, TransactionRow>();
+        for (const r of baselineRef.current) byId.set(r.tx_id, r);
+        for (const r of busRows) byId.set(r.tx_id, r);
+        setRows([...byId.values()]);
+      }),
+    [],
+  );
 
   const data = useMemo(() => rowsToPoints(rows), [rows]);
 

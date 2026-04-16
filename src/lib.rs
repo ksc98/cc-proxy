@@ -128,7 +128,8 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
                 model,
                 max_tokens,
                 thinking_budget,
-                tools_json,
+                tools_json: _,
+                tool_choice,
                 user_text,
             } = parse_request_body(&start_body);
             let payload = json!({
@@ -136,7 +137,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
                 "ts": start,
                 "session_id": start_session,
                 "model": model,
-                "tools_json": tools_json,
+                "tool_choice": tool_choice,
                 "user_text": user_text,
                 "thinking_budget": thinking_budget,
                 "max_tokens": max_tokens,
@@ -179,6 +180,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             max_tokens,
             thinking_budget,
             tools_json: _,
+            tool_choice: _,
             user_text,
         } = parse_request_body(&req_body_for_parse);
         let assistant_text = if stats.assistant_text.is_empty() {
@@ -1919,11 +1921,14 @@ struct ParsedRequest {
     model: Option<String>,
     max_tokens: Option<i64>,
     thinking_budget: Option<i64>,
-    /// JSON array of tool names DECLARED in the request (not yet used).
-    /// Populated at placeholder time so the dashboard can hint at which
-    /// tools the turn has available; overwritten at finalize with the
-    /// tools actually invoked during the turn.
+    /// JSON array of tool names DECLARED in the request. Kept in the struct
+    /// so it can be re-enabled in the broadcast if needed; currently only
+    /// `tool_choice` is sent for in-flight rows.
+    #[allow(dead_code)]
     tools_json: Option<String>,
+    /// Compact representation of the request's `tool_choice` field:
+    /// "auto", "any", or "tool:<name>" for forced tool use.
+    tool_choice: Option<String>,
     /// Concatenated text of the last user-role message's content blocks:
     /// `text` blocks verbatim, and `tool_result` blocks' string/array text.
     /// `image` blocks are skipped. Truncated to `TEXT_COL_CAP` chars.
@@ -1957,6 +1962,19 @@ fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
         .filter(|v| !v.is_empty())
         .and_then(|v| serde_json::to_string(&v).ok());
 
+    let tool_choice = v.get("tool_choice").and_then(|tc| {
+        let ty = tc.get("type").and_then(|t| t.as_str())?;
+        match ty {
+            "auto" => Some("auto".to_string()),
+            "any" => Some("any".to_string()),
+            "tool" => {
+                let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                Some(format!("tool:{name}"))
+            }
+            _ => None,
+        }
+    });
+
     // Find the LAST user-role message — that's the one carrying the turn's
     // new content. Earlier entries are the replayed conversation prefix and
     // are already captured on their own turn's row.
@@ -1977,6 +1995,7 @@ fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
         max_tokens,
         thinking_budget,
         tools_json,
+        tool_choice,
         user_text,
     }
 }
