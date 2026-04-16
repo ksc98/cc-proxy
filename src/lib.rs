@@ -41,7 +41,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
 
     let user_hash = compute_user_hash(&req_headers_vec, &salt, &env)
         .await
-        .map(|(h, _email)| h);
+        .map(|(h, _email, _legacy)| h);
     let session_id = header_value(&req_headers_vec, "x-claude-code-session-id");
 
     // Quick request log line (kept for tail visibility).
@@ -284,8 +284,8 @@ async fn admin_route(
     salt: &str,
     env: &Env,
 ) -> Result<Response> {
-    let (user_hash, email) = match compute_user_hash(headers, salt, env).await {
-        Some(pair) => pair,
+    let (user_hash, email, legacy_hash) = match compute_user_hash(headers, salt, env).await {
+        Some(t) => t,
         None => return Response::error("missing authorization", 401),
     };
 
@@ -293,7 +293,29 @@ async fn admin_route(
         return Response::from_json(&json!({
             "user_hash": user_hash,
             "email": email,
+            "legacy_hash": legacy_hash,
         }));
+    }
+
+    // One-shot merge of the caller's pre-email-flip DO (uuid-keyed) into
+    // their current (email-keyed) DO. Idempotent — re-running copies nothing
+    // new. Source DO's data is dropped after a successful copy so the
+    // legacy DO stops showing up in CF analytics.
+    if path == "/_cm/admin/migrate-legacy" && method == &Method::Post {
+        let Some(legacy) = legacy_hash.as_ref() else {
+            return Response::error(
+                "no legacy hash available (api-key auth or token-cache miss)",
+                400,
+            );
+        };
+        if legacy == &user_hash {
+            return Response::from_json(&json!({
+                "copied_transactions": 0,
+                "copied_session_ends": 0,
+                "note": "legacy hash == current hash; no-op",
+            }));
+        }
+        return handle_migrate_legacy(&user_hash, legacy, env).await;
     }
 
     // /_cm/admin/sql supports a hash override in the body for cross-DO
@@ -431,6 +453,7 @@ impl DurableObject for UserStore {
             (Method::Post, "/search") => self.search(&mut req).await,
             (Method::Post, "/turn") => self.fetch_turn(&mut req).await,
             (Method::Post, "/vectorize/backfill") => self.vectorize_backfill(&mut req).await,
+            (Method::Post, "/migrate-in") => self.migrate_in(&mut req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -1128,6 +1151,89 @@ impl UserStore {
             "total_rows": total_rows,
             "batch_upsert_ms": batch_upsert_ms,
         }))
+    }
+
+    // One-shot merge of a source DO's data into self. Used by
+    // /_cm/admin/migrate-legacy to fold the pre-email-flip uuid-keyed DO
+    // into the caller's current email-keyed DO. Idempotent via INSERT OR
+    // IGNORE on PK (tx_id for transactions, session_id for session_ends).
+    // After a successful copy, drops the source's tables so the legacy DO
+    // stops consuming storage (and stops showing up in CF analytics once
+    // its last invocation ages out of the 30d window).
+    async fn migrate_in(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            source_hash: String,
+        }
+        let body: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if body.source_hash.trim().is_empty() {
+            return Response::error("source_hash required", 400);
+        }
+
+        let ns = self.env.durable_object("USER_STORE")?;
+        let source = ns.id_from_name(&body.source_hash)?.get_stub()?;
+
+        let txns = fetch_rows_from_stub(&source, "SELECT * FROM transactions").await?;
+        let copied_transactions = self.insert_rows("transactions", &txns)?;
+
+        let ends = fetch_rows_from_stub(&source, "SELECT * FROM session_ends").await?;
+        let copied_session_ends = self.insert_rows("session_ends", &ends)?;
+
+        // Zero the legacy DO's storage. FTS virtual table + triggers get
+        // torn down with `transactions`. search_rate_limit is ephemeral
+        // counter state; drop it too.
+        for drop_stmt in [
+            "DROP TABLE IF EXISTS transactions_fts",
+            "DROP TABLE IF EXISTS transactions",
+            "DROP TABLE IF EXISTS session_ends",
+            "DROP TABLE IF EXISTS search_rate_limit",
+        ] {
+            let _ = fetch_rows_from_stub(&source, drop_stmt).await;
+        }
+
+        Response::from_json(&json!({
+            "source_hash": body.source_hash,
+            "copied_transactions": copied_transactions,
+            "copied_session_ends": copied_session_ends,
+            "total_source_rows": txns.len() + ends.len(),
+        }))
+    }
+
+    // Dynamic INSERT OR IGNORE for migrated rows. Column list is taken
+    // from the row object itself (sqlite-backed /sql preserves projection
+    // order), so schema additions since the legacy DO was written are
+    // simply missing keys — they stay NULL in the target, which matches
+    // what a fresh row with a new column would look like anyway.
+    fn insert_rows(&self, table: &str, rows: &[serde_json::Value]) -> Result<i64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let sql = self.state.storage().sql();
+        let mut inserted = 0i64;
+        for row in rows {
+            let Some(obj) = row.as_object() else {
+                continue;
+            };
+            let cols: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+            if cols.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; cols.len()].join(",");
+            let col_list = cols.join(",");
+            let stmt = format!(
+                "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
+                table, col_list, placeholders
+            );
+            let params: Vec<SqlStorageValue> =
+                cols.iter().map(|c| json_to_sql_value(&obj[*c])).collect();
+            if sql.exec(&stmt, Some(params)).is_ok() {
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
     }
 
     // Fixed 60s window, 120 requests/min/user. Counter lives in the DO's
@@ -1955,6 +2061,58 @@ async fn handle_vectorize_backfill(user_hash: &str, body: &[u8], env: &Env) -> R
     stub.fetch_with_request(req).await
 }
 
+// POST {sql} to a stub's /sql handler and return the `rows` array from
+// the response. Used by migrate_in to read out the legacy DO's tables.
+async fn fetch_rows_from_stub(
+    stub: &worker::durable::Stub,
+    sql_query: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let body = json!({ "sql": sql_query });
+    let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let arr = Uint8Array::from(&body_bytes[..]);
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    let h = Headers::new();
+    h.append("content-type", "application/json").ok();
+    init.with_headers(h);
+    let req = Request::new_with_init("https://store/sql", &init)?;
+    let mut resp = stub.fetch_with_request(req).await?;
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v.get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+// Thin forwarder for /_cm/admin/migrate-legacy. The proxy has already
+// resolved target_hash (email-keyed, the caller's current identity) and
+// source_hash (the cached uuid-keyed hash from pre-email-flip). We fire the
+// copy at the *target* DO so it writes into itself via a DO-to-DO fetch
+// against the source — no cross-instance state lock issues, and all the
+// schema is already initialized there.
+async fn handle_migrate_legacy(
+    target_hash: &str,
+    source_hash: &str,
+    env: &Env,
+) -> Result<Response> {
+    let body = json!({ "source_hash": source_hash });
+    let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+
+    let ns = env.durable_object("USER_STORE")?;
+    let stub = ns.id_from_name(target_hash)?.get_stub()?;
+
+    let arr = Uint8Array::from(&body_bytes[..]);
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    let headers = Headers::new();
+    headers.append("content-type", "application/json").ok();
+    init.with_headers(headers);
+    let req = Request::new_with_init("https://store/migrate-in", &init)?;
+    stub.fetch_with_request(req).await
+}
+
 fn hits_from_rows(rows: Vec<serde_json::Value>, source: &str) -> Vec<SearchHit> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2068,20 +2226,23 @@ fn header_value(entries: &[(String, String)], name: &str) -> Option<String> {
 // without any manual setup step.
 //
 // API keys hash directly — they're already stable identifiers.
+// Returns (hash, email, legacy_uuid_hash). legacy_uuid_hash is the
+// pre-email-flip hash — exposed so /_cm/admin/migrate-legacy can find
+// the caller's old DO without asking them to dig it up manually.
 async fn compute_user_hash(
     entries: &[(String, String)],
     salt: &str,
     env: &Env,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<String>, Option<String>)> {
     if let Some(raw_auth) = header_value(entries, "authorization") {
         let token = raw_auth
             .strip_prefix("Bearer ")
             .unwrap_or(&raw_auth)
             .to_string();
-        return Some(resolve_oauth_hash(&token, salt, env).await);
+        return resolve_oauth_hash(&token, salt, env).await;
     }
     if let Some(api_key) = header_value(entries, "x-api-key") {
-        return Some((hash_identity(salt, "apikey:", &api_key), None));
+        return Some((hash_identity(salt, "apikey:", &api_key), None, None));
     }
     None
 }
@@ -2094,9 +2255,17 @@ fn hash_identity(salt: &str, prefix: &str, id: &str) -> String {
     hex::encode(&h.finalize()[..8])
 }
 
-async fn resolve_oauth_hash(token: &str, salt: &str, env: &Env) -> (String, Option<String>) {
-    // token_id identifies "this bearer value" without exposing the bearer in
-    // KV keys. Salted so different deployments never share KV state.
+// Returns None when profile + KV are both unavailable. The old code hashed
+// the raw bearer in that case as a "degraded" fallback, but since tokens
+// rotate, every transient failure spawned a fresh ghost DO. Returning None
+// lets the proxy still passthrough to Anthropic (Claude Code keeps working)
+// and silently skips ingestion for the duration of the blip — next
+// successful resolve auto-rejoins the user's real DO.
+async fn resolve_oauth_hash(
+    token: &str,
+    salt: &str,
+    env: &Env,
+) -> Option<(String, Option<String>, Option<String>)> {
     let token_id = hash_identity(salt, "tok:", token);
     let cache_key = format!("tok:{}", token_id);
 
@@ -2107,10 +2276,11 @@ async fn resolve_oauth_hash(token: &str, salt: &str, env: &Env) -> (String, Opti
     // dashboard's Google SSO sees), uuid is just there for debugging.
     if let Ok(kv) = env.kv("SESSION") {
         if let Ok(Some(cached)) = kv.get(&cache_key).text().await {
-            if let Some((_uuid, email)) = cached.split_once('|') {
+            if let Some((uuid, email)) = cached.split_once('|') {
                 let hash = hash_identity(salt, "email:", email);
+                let legacy = hash_identity(salt, "uuid:", uuid);
                 auto_link(&kv, email, &hash).await;
-                return (hash, Some(email.to_string()));
+                return Some((hash, Some(email.to_string()), Some(legacy)));
             }
         }
 
@@ -2121,19 +2291,16 @@ async fn resolve_oauth_hash(token: &str, salt: &str, env: &Env) -> (String, Opti
                 let _ = builder.expiration_ttl(3600).execute().await;
             }
             let hash = hash_identity(salt, "email:", &email);
+            let legacy = hash_identity(salt, "uuid:", &uuid);
             auto_link(&kv, &email, &hash).await;
-            return (hash, Some(email));
+            return Some((hash, Some(email), Some(legacy)));
         }
     }
 
-    // Degraded fallback — raw-token hash. Prefix keeps it in a disjoint
-    // namespace from email hashes so a future successful resolve rejoins the
-    // stable identity cleanly. Rare: only fires on KV outages or profile
-    // endpoint failures.
     console_log!(
-        "{{\"dir\":\"hash_fallback\",\"reason\":\"profile_or_kv_unavailable\"}}"
+        "{{\"dir\":\"hash_skip\",\"reason\":\"profile_or_kv_unavailable\"}}"
     );
-    (hash_identity(salt, "raw:", token), None)
+    None
 }
 
 async fn fetch_anthropic_profile(token: &str) -> Option<(String, String)> {

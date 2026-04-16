@@ -58,6 +58,11 @@ enum Cmd {
     /// namespace. Idempotent; safe to re-run. Needed one-off after the
     /// namespace migration for vectors that predate it.
     VectorizeBackfill(BackfillArgs),
+    /// One-shot merge of your pre-email-flip DO (uuid-keyed) into your
+    /// current (email-keyed) DO. Server derives both hashes from the
+    /// cached OAuth profile. Idempotent via INSERT OR IGNORE on PK.
+    /// Drops the legacy DO's tables after copy.
+    Migrate,
 }
 
 #[derive(clap::Args)]
@@ -224,6 +229,10 @@ fn main() -> Result<()> {
             "/_cm/session/end",
         ),
         Cmd::Session(SessionCmd::Ends) => (Method::Get, "/_cm/sessions/ends"),
+        Cmd::Migrate => (
+            Method::Post(serde_json::json!({})),
+            "/_cm/admin/migrate-legacy",
+        ),
     };
     let token = read_token()?;
     let base = resolve_base(url_opt.as_deref())?;
