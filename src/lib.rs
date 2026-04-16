@@ -999,7 +999,7 @@ impl UserStore {
     async fn recent(&self, req: &Request) -> Result<Response> {
         let since = query_i64(req, "since").unwrap_or(0);
         let sql = self.state.storage().sql();
-        // List-view columns only: excludes user_text / assistant_text / tools_json
+        // List-view columns only: excludes user_text / assistant_text
         // — those are fetched on demand via /turn for the detail view.
         let cursor = sql.exec(
             "SELECT tx_id, ts, session_id, method, url, model, status, elapsed_ms,
@@ -1098,7 +1098,7 @@ impl UserStore {
         let cursor = sql.exec(
             "SELECT tx_id, ts, session_id, method, url, model, status, elapsed_ms,
                     input_tokens, output_tokens, cache_read, cache_creation,
-                    stop_reason, req_body_bytes, resp_body_bytes,
+                    stop_reason, tools_json, req_body_bytes, resp_body_bytes,
                     cache_creation_5m, cache_creation_1h,
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
