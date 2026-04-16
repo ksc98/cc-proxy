@@ -83,12 +83,18 @@ export function TurnDetail({ tx }: { tx: TransactionRow }) {
           <DetailRow
             label="max_tokens"
             value={
-              <span className="font-mono tabular-nums">
-                {fmtInt(tx.output_tokens)} / {fmtInt(tx.max_tokens)}
-                <span className="text-[var(--color-subtle-foreground)] ml-2">
-                  ({((tx.output_tokens / tx.max_tokens) * 100).toFixed(0)}%)
+              tx.in_flight === 1 ? (
+                <span className="font-mono tabular-nums text-[var(--color-subtle-foreground)]">
+                  {fmtInt(tx.max_tokens)}
                 </span>
-              </span>
+              ) : (
+                <span className="font-mono tabular-nums">
+                  {fmtInt(tx.output_tokens)} / {fmtInt(tx.max_tokens)}
+                  <span className="text-[var(--color-subtle-foreground)] ml-2">
+                    ({((tx.output_tokens / tx.max_tokens) * 100).toFixed(0)}%)
+                  </span>
+                </span>
+              )
             }
           />
         )}

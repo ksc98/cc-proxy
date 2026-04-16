@@ -222,23 +222,22 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="font-mono text-xs text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
+      const inflight = tx.in_flight === 1;
       const m = tx.model;
       const thought = (tx.thinking_blocks ?? 0) > 0;
       const budget = tx.thinking_budget ?? null;
       return (
-        <span className="font-mono text-xs inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span
+          className={cn(
+            "font-mono text-xs inline-flex items-center gap-1.5 whitespace-nowrap",
+            inflight && "text-[var(--color-subtle-foreground)]",
+          )}
+        >
           <span title={m ?? "—"}>{shortModel(m)}</span>
           {(thought || budget != null) && (
             <span
               className="inline-flex items-center gap-0.5 text-[var(--color-chart-4)]"
-              title={`extended thinking${thought ? ` · ${tx.thinking_blocks} block${(tx.thinking_blocks ?? 0) > 1 ? "s" : ""}` : " budget set, not used this turn"}${budget ? ` · budget ${fmtInt(budget)}` : ""}`}
+              title={`extended thinking${thought ? ` · ${tx.thinking_blocks} block${(tx.thinking_blocks ?? 0) > 1 ? "s" : ""}` : inflight ? " budget set" : " budget set, not used this turn"}${budget ? ` · budget ${fmtInt(budget)}` : ""}`}
             >
               <Sparkles size={10} className="shrink-0" aria-label="extended thinking" />
               {budget != null && (

@@ -119,18 +119,41 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     // background alongside the upstream fetch, so the dashboard sees an
     // in_flight=1 row within one DO round-trip of the request arriving —
     // even if the upstream takes 30s to finish streaming.
+    //
+    // Extract request-side knobs (model, max_tokens, thinking_budget,
+    // declared tools, last user message) so the dashboard has something
+    // to render while the turn is mid-flight. Finalize overwrites this
+    // row with SSE-derived authoritative values.
     if let Some(stub) = placeholder_stub {
-        let placeholder = TransactionRecord {
-            tx_id: placeholder_tx_id.clone(),
-            ts: start,
-            session_id: session_id.clone(),
-            method: method.to_string(),
-            url: target.clone(),
-            req_body_bytes: req_body_len,
-            in_flight: Some(1),
-            ..Default::default()
-        };
+        let placeholder_tx = placeholder_tx_id.clone();
+        let placeholder_session = session_id.clone();
+        let placeholder_method = method.to_string();
+        let placeholder_url = target.clone();
+        let placeholder_body = req_body_bytes.clone();
+        let placeholder_len = req_body_len;
         ctx.wait_until(async move {
+            let ParsedRequest {
+                model,
+                max_tokens,
+                thinking_budget,
+                tools_json,
+                user_text,
+            } = parse_request_body(&placeholder_body);
+            let placeholder = TransactionRecord {
+                tx_id: placeholder_tx,
+                ts: start,
+                session_id: placeholder_session,
+                method: placeholder_method,
+                url: placeholder_url,
+                req_body_bytes: placeholder_len,
+                in_flight: Some(1),
+                model,
+                max_tokens,
+                thinking_budget,
+                tools_json,
+                user_text,
+                ..Default::default()
+            };
             post_record_to_do(&stub, "/ingest/start", &placeholder).await;
         });
     }
@@ -161,9 +184,14 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         };
 
         // Request-side knobs. Cheap to parse — the body is already in memory.
+        // `model`/`tools` from the request are only used for the inflight
+        // placeholder; here at finalize the SSE-derived values (resolved
+        // model, tools actually invoked) are authoritative.
         let ParsedRequest {
+            model: _,
             max_tokens,
             thinking_budget,
+            tools_json: _,
             user_text,
         } = parse_request_body(&req_body_for_parse);
         let assistant_text = if stats.assistant_text.is_empty() {
@@ -1640,8 +1668,18 @@ const TEXT_COL_CAP: usize = 256 * 1024;
 
 #[derive(Default)]
 struct ParsedRequest {
+    /// `model` from the request body. Canonical form comes from the SSE
+    /// `message_start` event; this is the caller-supplied alias (e.g.
+    /// `claude-opus-4-6`) which is still useful while the turn is in
+    /// flight and no SSE frames have arrived yet.
+    model: Option<String>,
     max_tokens: Option<i64>,
     thinking_budget: Option<i64>,
+    /// JSON array of tool names DECLARED in the request (not yet used).
+    /// Populated at placeholder time so the dashboard can hint at which
+    /// tools the turn has available; overwritten at finalize with the
+    /// tools actually invoked during the turn.
+    tools_json: Option<String>,
     /// Concatenated text of the last user-role message's content blocks:
     /// `text` blocks verbatim, and `tool_result` blocks' string/array text.
     /// `image` blocks are skipped. Truncated to `TEXT_COL_CAP` chars.
@@ -1653,12 +1691,27 @@ fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
         Ok(v) => v,
         Err(_) => return ParsedRequest::default(),
     };
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     let max_tokens = v.get("max_tokens").and_then(|x| x.as_i64());
     let thinking_budget = v
         .get("thinking")
         .and_then(|t| t.as_object())
         .filter(|o| o.get("type").and_then(|x| x.as_str()) == Some("enabled"))
         .and_then(|o| o.get("budget_tokens").and_then(|x| x.as_i64()));
+
+    let tools_json = v
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .and_then(|v| serde_json::to_string(&v).ok());
 
     // Find the LAST user-role message — that's the one carrying the turn's
     // new content. Earlier entries are the replayed conversation prefix and
@@ -1676,8 +1729,10 @@ fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
         .map(truncate_text);
 
     ParsedRequest {
+        model,
         max_tokens,
         thinking_budget,
+        tools_json,
         user_text,
     }
 }
