@@ -125,6 +125,17 @@ export default function WsClient({
         }
 
         case "session_end": {
+          // A ended session can't have in-flight turns — flush any orphaned
+          // virtuals immediately instead of waiting for the 5-min stale timer.
+          let flushed = false;
+          for (const [id, row] of inFlight) {
+            if (row.session_id === msg.data.session_id) {
+              inFlight.delete(id);
+              flushed = true;
+            }
+          }
+          if (flushed) mergeAndPublish();
+
           window.dispatchEvent(
             new CustomEvent("cm:session-end", { detail: msg.data }),
           );

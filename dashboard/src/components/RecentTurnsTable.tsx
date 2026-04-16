@@ -556,6 +556,13 @@ export default function RecentTurnsTable({
   // turn-level data — nothing from the bus loads them implicitly.
   React.useEffect(() => {
     return subscribeRows((rows) => {
+      // Build a set of in-flight tx_ids currently live on the bus so we can
+      // prune orphaned virtuals that the stale timer already removed.
+      const liveInflight = new Set<string>();
+      for (const r of rows) {
+        if (r.in_flight === 1) liveInflight.add(r.tx_id);
+      }
+
       setTurnsBySession((prev) => {
         const next = { ...prev };
         const touched = new Set<string>();
@@ -564,9 +571,19 @@ export default function RecentTurnsTable({
           if (!(r.session_id in next)) continue; // never auto-load collapsed
           touched.add(r.session_id);
         }
+        // Also check loaded sessions for stale virtuals that vanished from the bus.
+        for (const sid of Object.keys(next)) {
+          if (next[sid]?.some((r) => r.in_flight === 1 && !liveInflight.has(r.tx_id))) {
+            touched.add(sid);
+          }
+        }
         for (const sid of touched) {
           const byId = new Map<string, TransactionRow>();
-          for (const r of next[sid] ?? []) byId.set(r.tx_id, r);
+          // Carry over non-virtual rows; only keep virtuals still live on the bus.
+          for (const r of next[sid] ?? []) {
+            if (r.in_flight === 1 && !liveInflight.has(r.tx_id)) continue;
+            byId.set(r.tx_id, r);
+          }
           for (const r of rows) {
             if (r.session_id === sid) byId.set(r.tx_id, r);
           }
