@@ -508,6 +508,9 @@ export default function RecentTurnsTable({
   const seenIds = React.useRef<Set<string>>(
     new Set(initialSummaries.map((s) => `g:${s.id}`)),
   );
+  const prevActiveIds = React.useRef<Set<string>>(
+    new Set(initialSummaries.filter((s) => s.active).map((s) => s.id)),
+  );
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = React.useState("");
   const [columnVisibility, setColumnVisibility] =
@@ -656,6 +659,26 @@ export default function RecentTurnsTable({
         }
       }
       return changed ? next : prev;
+    });
+  }, [summaries]);
+
+  // Auto-collapse sessions that just ended (active → inactive transition).
+  React.useEffect(() => {
+    const nowActive = new Set(
+      summaries.filter((s) => s.active).map((s) => s.id),
+    );
+    const justEnded: string[] = [];
+    for (const id of prevActiveIds.current) {
+      if (!nowActive.has(id)) justEnded.push(id);
+    }
+    prevActiveIds.current = nowActive;
+    if (justEnded.length === 0) return;
+    setExpanded((prev) => {
+      if (typeof prev !== "object" || prev == null) return prev;
+      const p = prev as Record<string, boolean>;
+      const next = { ...p };
+      for (const id of justEnded) next[`g:${id}`] = false;
+      return next;
     });
   }, [summaries]);
 
