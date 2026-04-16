@@ -463,26 +463,25 @@ function parentIdFor(leaf: LeafRow): string {
   return `g:${leaf.tx.session_id ?? "__unlinked__"}`;
 }
 
-function initialExpanded(rows: TransactionRow[]): Record<string, boolean> {
-  const now = Date.now();
-  const groups = buildGroups(rows);
-  const out: Record<string, boolean> = {};
-  for (let i = 0; i < groups.length; i++) {
-    const g = groups[i];
-    if (i === 0 || now - g.lastTs < ACTIVE_WINDOW_MS) out[g.id] = true;
-  }
-  return out;
-}
-
 export default function RecentTurnsTable({
   initialRows,
 }: {
   initialRows: TransactionRow[];
 }) {
   const [rows, setRows] = React.useState<TransactionRow[]>(initialRows);
-  const [expanded, setExpanded] = React.useState<ExpandedState>(() =>
-    initialExpanded(initialRows),
-  );
+  const autoExpanded = React.useRef<Set<string>>(new Set());
+  const [expanded, setExpanded] = React.useState<ExpandedState>(() => {
+    const now = Date.now();
+    const groups = buildGroups(initialRows);
+    const out: Record<string, boolean> = {};
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      const active = now - g.lastTs < ACTIVE_WINDOW_MS;
+      if (i === 0 || active) out[g.id] = true;
+      if (active) autoExpanded.current.add(g.id);
+    }
+    return out;
+  });
   const seenIds = React.useRef<Set<string>>(
     new Set(buildGroups(initialRows).map((g) => g.id)),
   );
@@ -520,24 +519,82 @@ export default function RecentTurnsTable({
 
   React.useEffect(() => subscribeRows(setRows), []);
 
+  const handleExpandedChange = React.useCallback(
+    (updater: React.SetStateAction<ExpandedState>) => {
+      setExpanded((prev) => {
+        const next =
+          typeof updater === "function"
+            ? (updater as (p: ExpandedState) => ExpandedState)(prev)
+            : updater;
+        if (
+          typeof prev === "object" &&
+          prev != null &&
+          typeof next === "object" &&
+          next != null
+        ) {
+          const p = prev as Record<string, boolean>;
+          const n = next as Record<string, boolean>;
+          const keys = new Set([...Object.keys(p), ...Object.keys(n)]);
+          for (const k of keys) {
+            if (!!p[k] !== !!n[k]) autoExpanded.current.delete(k);
+          }
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
   const data = React.useMemo(() => buildGroups(rows), [rows]);
 
   React.useEffect(() => {
     setExpanded((prev) => {
       if (typeof prev !== "object" || prev == null) return prev;
       const now = Date.now();
-      const next = { ...(prev as Record<string, boolean>) };
+      const p = prev as Record<string, boolean>;
+      const next = { ...p };
       let changed = false;
       for (const g of data) {
-        if (seenIds.current.has(g.id)) continue;
-        seenIds.current.add(g.id);
-        if (now - g.lastTs < ACTIVE_WINDOW_MS) {
-          next[g.id] = true;
+        const active = now - g.lastTs < ACTIVE_WINDOW_MS;
+        if (!seenIds.current.has(g.id)) {
+          seenIds.current.add(g.id);
+          if (active) {
+            next[g.id] = true;
+            autoExpanded.current.add(g.id);
+            changed = true;
+          }
+        } else if (!active && p[g.id] && autoExpanded.current.has(g.id)) {
+          delete next[g.id];
+          autoExpanded.current.delete(g.id);
           changed = true;
         }
       }
       return changed ? next : prev;
     });
+  }, [data]);
+
+  React.useEffect(() => {
+    const tick = () => {
+      setExpanded((prev) => {
+        if (typeof prev !== "object" || prev == null) return prev;
+        const now = Date.now();
+        const p = prev as Record<string, boolean>;
+        const next = { ...p };
+        let changed = false;
+        for (const g of data) {
+          if (!p[g.id]) continue;
+          if (!autoExpanded.current.has(g.id)) continue;
+          if (now - g.lastTs >= ACTIVE_WINDOW_MS) {
+            delete next[g.id];
+            autoExpanded.current.delete(g.id);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    };
+    const id = setInterval(tick, 30_000);
+    return () => clearInterval(id);
   }, [data]);
 
   const table = useReactTable({
@@ -546,7 +603,7 @@ export default function RecentTurnsTable({
     state: { expanded, sorting, globalFilter, columnVisibility },
     getRowId: (r) => r.id,
     getSubRows: (r) => (r.kind === "group" ? (r as GroupRow).subRows : undefined),
-    onExpandedChange: setExpanded,
+    onExpandedChange: handleExpandedChange,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
     onColumnVisibilityChange: setColumnVisibility,
