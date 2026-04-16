@@ -45,8 +45,8 @@ const userHash = linked ?? cookieHash;
 
 const ns = env.USER_STORE;
 
-// Pill window (default 1h) — drives stats/recent `since` filter so every
-// KPI + sparkline + chart on the page reflects the same time range.
+// Pill window (default 1h) — controls the "Tokens & cost over time" chart only.
+// KPI cards always show all-time aggregates.
 const win = parseWindow(Astro.url.searchParams);
 const sinceMs = windowSince(win);
 
@@ -58,8 +58,8 @@ let loadErr: string | null = null;
 if (userHash) {
   try {
     [stats, rows, sessionBuckets, sessionEnds] = await Promise.all([
-      getStats(ns, userHash, sinceMs),
-      getRecent(ns, userHash, sinceMs),
+      getStats(ns, userHash),           // all-time (no since filter)
+      getRecent(ns, userHash, sinceMs), // windowed — feeds chart + sparklines
       getSessionsSummary(ns, userHash),
       getSessionEnds(ns, userHash),
     ]);
@@ -88,8 +88,9 @@ activeSessionIds.forEach((id, i) => {
 // Chronological: oldest → newest for chart + rolling sparklines
 const chron = [...rows].sort((a, b) => a.ts - b.ts);
 
-const totalCost = rows.reduce((acc, r) => acc + estimateCostUsd(r), 0);
-const sessions = new Set(rows.map((r) => r.session_id).filter(Boolean)).size;
+// KPI values — all-time from stats (not from the windowed rows).
+const totalCost = stats?.estimated_cost_usd ?? 0;
+const totalSessions = stats?.sessions ?? 0;
 
 const cacheRate = (() => {
   if (!stats) return 0;
@@ -97,16 +98,16 @@ const cacheRate = (() => {
   return denom > 0 ? stats.cache_read / denom : 0;
 })();
 
-// Cache TTL split (only present on newer API responses; may be null on old rows).
-const cache5mTotal = rows.reduce((a, r) => a + (r.cache_creation_5m ?? 0), 0);
-const cache1hTotal = rows.reduce((a, r) => a + (r.cache_creation_1h ?? 0), 0);
+// Cache TTL split — all-time from stats.
+const cache5mTotal = stats?.cache_creation_5m ?? 0;
+const cache1hTotal = stats?.cache_creation_1h ?? 0;
 const ttlKnown = cache5mTotal + cache1hTotal > 0;
 const longTtlPct = ttlKnown
   ? (cache1hTotal / (cache5mTotal + cache1hTotal)) * 100
   : 0;
 
 const avgLatency =
-  rows.length > 0 ? rows.reduce((a, r) => a + r.elapsed_ms, 0) / rows.length : 0;
+  stats && stats.turns > 0 ? stats.total_elapsed_ms / stats.turns : 0;
 
 // Sparklines (chronological)
 const sparkTurns = (() => {
@@ -199,8 +200,8 @@ const rateLimit =
   title="llmetry — overview"
   headerStats={{
     spendUsd: totalCost,
-    turns: rows.length,
-    sessions,
+    turns: stats?.turns ?? rows.length,
+    sessions: totalSessions,
     activeSession: activeSession ? shortSession(activeSession.id) : null,
     burnUsdPerMin,
     errorRate,
@@ -213,7 +214,7 @@ const rateLimit =
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
       <p class="text-xs text-[var(--color-subtle-foreground)] mt-1">
-        Last {rows.length} transactions · {win} window
+        {fmtInt(stats?.turns ?? 0)} total transactions · chart: {win} window
       </p>
     </div>
     <div class="flex items-center gap-3">
@@ -276,9 +277,9 @@ const rateLimit =
           <Database slot="icon" size={16} />
         </KpiCard>
         <KpiCard
-          label="Cost (window)"
+          label="Cost"
           value={fmtUsd(totalCost)}
-          sub={`${rows.length} turns · ${sessions} sessions`}
+          sub={`${fmtInt(stats.turns)} turns · ${totalSessions} sessions`}
           accent="money"
           sparkValues={sparkCost}
           sparkMode="bars"

@@ -1,9 +1,21 @@
-// Model pricing per 1M tokens (USD). Update as Anthropic changes rates.
+// Model pricing per 1M tokens (USD). Source: platform.claude.com/docs/en/about-claude/pricing
+// cacheRead = 0.1x base input; cacheWrite5m = 1.25x base input.
 const PRICING: Record<string, { in: number; out: number; cacheRead: number; cacheWrite5m: number }> = {
-  "claude-opus-4-6": { in: 15, out: 75, cacheRead: 1.5, cacheWrite5m: 18.75 },
-  "claude-sonnet-4-6": { in: 3, out: 15, cacheRead: 0.3, cacheWrite5m: 3.75 },
-  "claude-haiku-4-5-20251001": { in: 1, out: 5, cacheRead: 0.1, cacheWrite5m: 1.25 },
-  "claude-haiku-4-5": { in: 1, out: 5, cacheRead: 0.1, cacheWrite5m: 1.25 },
+  "claude-opus-4-6":            { in: 5,    out: 25,   cacheRead: 0.50, cacheWrite5m: 6.25  },
+  "claude-opus-4-5":            { in: 5,    out: 25,   cacheRead: 0.50, cacheWrite5m: 6.25  },
+  "claude-opus-4-1":            { in: 15,   out: 75,   cacheRead: 1.50, cacheWrite5m: 18.75 },
+  "claude-opus-4":              { in: 15,   out: 75,   cacheRead: 1.50, cacheWrite5m: 18.75 },
+  "claude-sonnet-4-6":          { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-sonnet-4-5":          { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-sonnet-4":            { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-sonnet-4-5-20241022": { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-haiku-4-5-20251001":  { in: 1,    out: 5,    cacheRead: 0.10, cacheWrite5m: 1.25  },
+  "claude-haiku-4-5":           { in: 1,    out: 5,    cacheRead: 0.10, cacheWrite5m: 1.25  },
+  "claude-3-5-sonnet-20241022": { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-3-5-sonnet-20240620": { in: 3,    out: 15,   cacheRead: 0.30, cacheWrite5m: 3.75  },
+  "claude-3-5-haiku-20241022":  { in: 1,    out: 5,    cacheRead: 0.10, cacheWrite5m: 1.25  },
+  "claude-3-opus-20240229":     { in: 15,   out: 75,   cacheRead: 1.50, cacheWrite5m: 18.75 },
+  "claude-3-haiku-20240307":    { in: 0.25, out: 1.25, cacheRead: 0.03, cacheWrite5m: 0.30  },
 };
 
 export function estimateCostUsd(row: {
