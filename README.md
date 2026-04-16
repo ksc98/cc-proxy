@@ -12,7 +12,7 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
          │ POST /v1/messages                              │ unchanged
          ▼                                                │
   ┌──────────────────────────────────────────────────────────┐
-  │  cc-proxy (Rust Worker)                                  │
+  │  claudemetry-api (Rust Worker)                           │
   │                                                          │
   │   identify    →  GET /oauth/profile   (KV cache, 1h TTL) │
   │                  user_hash = sha256(salt ‖ email)[:8]    │
@@ -67,7 +67,7 @@ mise trust          # one-time, approves this repo's mise.toml
 just setup-mise     # installs rust/node/pnpm/just, wasm target, and worker-build
 ```
 
-That's everything needed to run `just local` or `just deploy`. `worker-build` is a cargo-installed binary (lives in `~/.cargo/bin`, not pinned in `mise.toml`) — `mise.toml`'s `[env]` block puts `~/.cargo/bin` on PATH whenever you're inside the repo, so the setup is fully portable and doesn't rely on your global shell config.
+That's everything needed to run `just local` or `just deploy-all`. `worker-build` is a cargo-installed binary (lives in `~/.cargo/bin`, not pinned in `mise.toml`) — `mise.toml`'s `[env]` block puts `~/.cargo/bin` on PATH whenever you're inside the repo, so the setup is fully portable and doesn't rely on your global shell config.
 
 Without mise, install the equivalents manually: Rust (with `wasm32-unknown-unknown`), Node ≥22.12, pnpm, [`just`](https://github.com/casey/just), and `cargo install worker-build`.
 
@@ -94,11 +94,11 @@ just local-tee run.log    # custom path
 ## Deploy to Cloudflare
 
 ```bash
-just login    # one-time, opens browser
-just deploy
+just login         # one-time, opens browser
+just deploy-all    # both workers (or: just deploy-api / just deploy-frontend)
 ```
 
-By default the worker is reachable at `https://cc-proxy.<your-subdomain>.workers.dev`. To use a custom domain, either uncomment the `routes` block in `wrangler.toml` (requires the zone to be on the same Cloudflare account) or bind the domain in the Cloudflare dashboard under Workers → cc-proxy → Settings → Domains & Routes.
+By default the worker is reachable at `https://claudemetry-api.<your-subdomain>.workers.dev`. To use a custom domain, either uncomment the `routes` block in `wrangler.toml` (requires the zone to be on the same Cloudflare account) or bind the domain in the Cloudflare dashboard under Workers → claudemetry-api → Settings → Domains & Routes.
 
 Before sending traffic, generate and install a per-deployment salt so hashes aren't portable across deployments:
 
@@ -429,7 +429,7 @@ for the `user_text` / `assistant_text` search columns) and then discarded.
   - `src/pages/api/search.ts` — thin forwarder: CF Access email → `user_hash` → DO `/search`
   - `src/components/SearchBox.tsx` — search input with `/` focus hotkey, mode switch, RRF-merged results
 - `scripts/cf-access.sh` — idempotent provisioner for the Access apps/policies (`just cf-access`)
-- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy`, `tail`, `clean`, `dashboard-dev`, `dashboard-deploy`, `dashboard-tail`, `deploy-all`, `cf-access`, `vectorize-create`, `vectorize-info`, `burnage-install`
+- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy-api`, `tail`, `clean`, `dashboard-dev`, `deploy-frontend`, `dashboard-tail`, `deploy-all`, `cf-access`, `vectorize-create`, `vectorize-info`, `burnage-install`
 
 ## Notes on trust
 

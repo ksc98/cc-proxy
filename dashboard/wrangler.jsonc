@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "claudemetry",
+  "name": "claudemetry-frontend",
   "compatibility_date": "2025-01-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
@@ -14,15 +14,15 @@
     { "pattern": "__DOMAIN__", "custom_domain": true }
   ],
 
-  // Bind to the UserStore DO class hosted inside the cc-proxy worker.
+  // Bind to the UserStore DO class hosted inside the claudemetry-api worker.
   // script_name makes this a cross-worker binding: we get a stub into
-  // cc-proxy's namespace without hosting the DO class ourselves.
+  // claudemetry-api's namespace without hosting the DO class ourselves.
   "durable_objects": {
     "bindings": [
       {
         "name": "USER_STORE",
         "class_name": "UserStore",
-        "script_name": "cc-proxy"
+        "script_name": "claudemetry-api"
       }
     ]
   },

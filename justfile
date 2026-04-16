@@ -13,7 +13,7 @@ setup-mise:
     rustup target add wasm32-unknown-unknown
     cargo install worker-build --locked
 
-# -------- cc-proxy (Rust worker) --------
+# -------- claudemetry-api (Rust worker) --------
 
 local:
     npx --yes wrangler@latest dev --local --port 8787
@@ -29,7 +29,7 @@ login:
 
 # Substitute __DOMAIN__ into wrangler.toml at deploy time, deploy from
 # the generated file, then drop it. Keeps the hostname out of source.
-deploy:
+deploy-api:
     #!/usr/bin/env bash
     set -euo pipefail
     sed "s/__DOMAIN__/$DOMAIN/g" wrangler.toml > wrangler.deploy.toml
@@ -42,7 +42,7 @@ tail:
 clean:
     rm -rf build target .wrangler
 
-# -------- claudemetry (Astro dashboard) --------
+# -------- claudemetry-frontend (Astro dashboard) --------
 
 dashboard-dev:
     cd dashboard && pnpm dev
@@ -52,7 +52,7 @@ dashboard-dev:
 # generated file and deploy from it. Source wrangler.jsonc stays lean
 # so the vite-plugin doesn't try to resolve a nonexistent `main` during
 # the build phase.
-dashboard-deploy:
+deploy-frontend:
     #!/usr/bin/env bash
     set -euo pipefail
     cd dashboard
@@ -64,7 +64,7 @@ dashboard-tail:
     cd dashboard && npx --yes wrangler@latest tail --format pretty
 
 # Deploy both workers.
-deploy-all: deploy dashboard-deploy
+deploy-all: deploy-api deploy-frontend
 
 # -------- Vectorize --------
 

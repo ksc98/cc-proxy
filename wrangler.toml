@@ -1,4 +1,4 @@
-name = "cc-proxy"
+name = "claudemetry-api"
 main = "build/worker/shim.mjs"
 compatibility_date = "2025-01-01"
 workers_dev = false
