@@ -470,7 +470,6 @@ const RIGHT_ALIGNED_COLS = new Set([
   "cost",
 ]);
 
-const ACTIVE_WINDOW_MS = 3 * 60_000;
 const HIDDEN_PER_GROUP = 5;
 const SHOW_MORE_CHUNK = 5;
 
@@ -479,11 +478,9 @@ function parentIdFor(leaf: LeafRow): string {
 }
 
 function initialExpanded(summaries: SessionSummary[]): Record<string, boolean> {
-  const now = Date.now();
   const out: Record<string, boolean> = {};
-  for (let i = 0; i < summaries.length; i++) {
-    const s = summaries[i];
-    if (i === 0 || now - s.lastTs < ACTIVE_WINDOW_MS) out[`g:${s.id}`] = true;
+  for (const s of summaries) {
+    if (s.active) out[`g:${s.id}`] = true;
   }
   return out;
 }
@@ -645,7 +642,6 @@ export default function RecentTurnsTable({
   React.useEffect(() => {
     setExpanded((prev) => {
       if (typeof prev !== "object" || prev == null) return prev;
-      const now = Date.now();
       const p = prev as Record<string, boolean>;
       const next = { ...p };
       let changed = false;
@@ -653,7 +649,7 @@ export default function RecentTurnsTable({
         const gid = `g:${s.id}`;
         if (seenIds.current.has(gid)) continue;
         seenIds.current.add(gid);
-        if (now - s.lastTs < ACTIVE_WINDOW_MS) {
+        if (s.active) {
           next[gid] = true;
           changed = true;
         }
