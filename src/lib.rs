@@ -274,9 +274,10 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             // block the SQLite finalize, which already succeeded above.
             if let Some(uh) = user_hash.as_deref() {
                 let combined = format!(
-                    "{}\n---\n{}",
+                    "{}\n---\n{}\n---\n{}",
                     record.user_text.as_deref().unwrap_or(""),
                     record.assistant_text.as_deref().unwrap_or(""),
+                    record.thinking_text.as_deref().unwrap_or(""),
                 );
                 if combined.trim().len() > 3 {
                     match embed_text(&env, &combined).await {
