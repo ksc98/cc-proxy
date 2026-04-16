@@ -76,8 +76,12 @@ if (mode === "line") {
   {
     mode === "bars" &&
       safeVals.map((v, i) => {
-        const barW = (width / n) * 0.7;
-        const barX = (i / n) * width + ((width / n) - barW) / 2;
+        // Aim for a small, fixed-looking gap (~1 viewBox unit) regardless of
+        // count — 70% slots looked airy when stretched to card width.
+        const slot = width / n;
+        const gap = Math.min(1, slot * 0.15);
+        const barW = Math.max(0.5, slot - gap);
+        const barX = i * slot + gap / 2;
         const h = ((v - min) / range) * (height - 2);
         const barY = height - h - 1;
         return (
@@ -87,7 +91,7 @@ if (mode === "line") {
             width={barW.toFixed(2)}
             height={Math.max(1, h).toFixed(2)}
             fill={color}
-            rx="1"
+            rx="0.5"
           />
         );
       })
