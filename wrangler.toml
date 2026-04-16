@@ -44,7 +44,12 @@ binding = "SESSION"
 id = "0217e705fa5f4ce7843f7ce7cbcf4f10"
 
 [build]
-command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+# Prepend ~/.cargo/bin so rustup-installed `cargo` and the freshly
+# `cargo install`ed `worker-build` resolve in fresh deploy shells
+# (e.g. Cloudflare Workers Builds) where ~/.cargo/bin is not on PATH.
+# Local dev and mise-managed shells already have it on PATH, so this
+# is a no-op there.
+command = "export PATH=\"$HOME/.cargo/bin:$PATH\" && cargo install -q \"worker-build@^0.8\" && worker-build --release"
 
 # Cloudflare caps cpu_ms at 300000 (5 min) for fetch handlers on the paid plan.
 # This is the highest value allowed; 15 min isn't supported for fetch handlers.
