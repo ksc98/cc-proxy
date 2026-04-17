@@ -265,15 +265,19 @@ pub fn vectorize_summary(index_name: &str) {
         .to_string();
 
     // https://developers.cloudflare.com/vectorize/platform/limits/
-    const VEC_CAP: f64 = 10_000_000.0;
-    let frac = vectors as f64 / VEC_CAP;
-    let cap_str = format!("{} / 10M", human_count(vectors));
+    // Billing limit is 10M stored dimensions (vectors × dims_per_vector).
+    const DIM_CAP: f64 = 10_000_000.0;
+    let stored_dims = vectors * dims;
+    let frac = stored_dims as f64 / DIM_CAP;
+    let vec_str = human_count(vectors);
+    let dim_str = format!("{} / 10M", human_count(stored_dims));
     let bar_str = bar(&sty, frac, BAR_WIDTH);
     let pct_str = format_pct(frac);
 
     let rows: Vec<(&str, String)> = vec![
-        ("vectors", format!("{cap_str}  {bar_str}  {pct_str}")),
-        ("dims", sty.bold(&dims.to_string())),
+        ("vectors", sty.bold(&vec_str)),
+        ("stored dims", format!("{dim_str}  {bar_str}  {pct_str}")),
+        ("dims/vec", sty.bold(&dims.to_string())),
         ("last mut", sty.dim(&mutation)),
         ("updated", sty.dim(&processed_at)),
     ];
