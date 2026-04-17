@@ -7,19 +7,16 @@ import {
   getSortedRowModel,
   useReactTable,
   type ColumnDef,
+  type ColumnFiltersState,
   type ExpandedState,
   type SortingState,
   type VisibilityState,
-  type Row,
 } from "@tanstack/react-table";
 import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Loader2,
-  SlidersHorizontal,
-  Search,
-  Sparkles,
 } from "lucide-react";
 import {
   Table,
@@ -30,29 +27,37 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  DataTableColumnHeader,
+  DataTableFacetedFilter,
+  DataTableToolbar,
+  type FacetOption,
+} from "@/components/ui/data-table";
 import type { TransactionRow } from "@/lib/store";
 import type { SessionSummary } from "@/lib/sessions";
-import {
-  estimateCostUsd,
-  fmtAgo,
-  fmtDuration,
-  fmtInt,
-  fmtUsd,
-} from "@/lib/format";
+import { fmtDuration, fmtUsd } from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
-import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
 import { TurnDetail } from "@/components/TurnDetail";
+import { ModelMixInline } from "@/components/ModelMixInline";
+import {
+  CacheReadCell,
+  CacheWrite1hCell,
+  CacheWrite5mCell,
+  COLUMN_LABELS,
+  CostCell,
+  DurationCell,
+  InTokensCell,
+  ModelCell,
+  OutTokensCell,
+  RIGHT_ALIGNED_COLS,
+  shortModel,
+  StopDot,
+  ToolsCell,
+  txAccessors,
+  WhenCell,
+} from "@/components/table-cells";
 
 type LeafRow = {
   kind: "leaf";
@@ -84,10 +89,6 @@ type UIRow = GroupRow | LeafRow;
 
 function shortSession(id: string | null): string {
   return id ? id.slice(0, 8) : "(no session)";
-}
-function shortModel(m: string | null | undefined): string {
-  if (!m) return "—";
-  return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
 }
 
 // Build groups from pre-aggregated summaries. Header metrics (turns/cost/
@@ -131,6 +132,18 @@ function buildGroups(
 
 const isLeaf = (r: UIRow): r is LeafRow => r.kind === "leaf";
 
+/** Filter fn for the tools column: row value is a space-separated short-name list. */
+function toolsFilterFn(
+  row: { getValue: (id: string) => unknown },
+  id: string,
+  value: string[],
+): boolean {
+  if (!Array.isArray(value) || value.length === 0) return true;
+  const hay = String(row.getValue(id) ?? "").split(" ").filter(Boolean);
+  if (hay.length === 0) return false;
+  return value.some((f) => hay.includes(f));
+}
+
 const columns: ColumnDef<UIRow>[] = [
   {
     id: "expand",
@@ -167,314 +180,105 @@ const columns: ColumnDef<UIRow>[] = [
     header: () => null,
     enableSorting: false,
     enableHiding: false,
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.stop(r.tx) : ""),
+    filterFn: "arrIncludesSome",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
-      const r = row.original.tx;
-      if (r.in_flight === 1) {
-        return (
-          <Loader2
-            size={10}
-            className="animate-spin text-[var(--color-subtle-foreground)]"
-            aria-label="in flight"
-          />
-        );
-      }
-      const cls = stopDotClass(r.stop_reason);
-      if (!cls) return null;
-      return (
-        <span
-          className={cn("dot", cls)}
-          title={r.stop_reason ?? "—"}
-          style={{ marginRight: 0 }}
-        />
-      );
+      return <StopDot tx={row.original.tx} />;
     },
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.ts + r.tx.elapsed_ms : (r as GroupRow).lastTs),
+    accessorFn: (r) =>
+      isLeaf(r) ? txAccessors.when(r.tx) : (r as GroupRow).lastTs,
     id: "when",
-    header: "When",
+    header: ({ column }) => <DataTableColumnHeader column={column} title="When" />,
     sortingFn: "basic",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
-      return (
-        <span
-          data-ts={finishedAt}
-          className="text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap"
-        >
-          {fmtAgo(finishedAt)}
-        </span>
-      );
+      return <WhenCell tx={row.original.tx} />;
     },
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.elapsed_ms : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.duration(r.tx) : 0),
     id: "duration",
-    header: "Duration",
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Duration" align="right" />
+    ),
     cell: ({ row }) =>
-      isLeaf(row.original) ? (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-          {row.original.tx.in_flight === 1
-            ? "—"
-            : fmtDuration(row.original.tx.elapsed_ms)}
-        </span>
-      ) : null,
+      isLeaf(row.original) ? <DurationCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.model ?? "" : ""),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.model(r.tx) : ""),
     id: "model",
-    header: "Model",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      const inflight = tx.in_flight === 1;
-      const m = tx.model;
-      const thought = (tx.thinking_blocks ?? 0) > 0;
-      const budget = tx.thinking_budget ?? null;
-      return (
-        <span
-          className={cn(
-            "font-mono text-xs inline-flex items-center gap-1.5 whitespace-nowrap",
-            inflight && "text-[var(--color-subtle-foreground)]",
-          )}
-        >
-          <span title={m ?? "—"}>{shortModel(m)}</span>
-          {(thought || budget != null) && (
-            <span
-              className="inline-flex items-center gap-0.5 text-[var(--color-chart-4)]"
-              title={`extended thinking${thought ? ` · ${tx.thinking_blocks} block${(tx.thinking_blocks ?? 0) > 1 ? "s" : ""}` : inflight ? " budget set" : " budget set, not used this turn"}${budget ? ` · budget ${fmtInt(budget)}` : ""}`}
-            >
-              <Sparkles size={10} className="shrink-0" aria-label="extended thinking" />
-              {budget != null && (
-                <span className="tabular-nums text-[0.625rem]">
-                  {budget >= 1000 ? `${Math.round(budget / 1000)}k` : budget}
-                </span>
-              )}
-            </span>
-          )}
-        </span>
-      );
-    },
+    header: ({ column }) => <DataTableColumnHeader column={column} title="Model" />,
+    filterFn: "arrIncludesSome",
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <ModelCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.input_tokens : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.in(r.tx) : 0),
     id: "in",
-    header: "In",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1 && "text-[var(--color-subtle-foreground)]",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtInt(tx.input_tokens)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="In" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <InTokensCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.output_tokens : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.out(r.tx) : 0),
     id: "out",
-    header: "Out",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const mx = tx.max_tokens ?? 0;
-      const util = mx > 0 ? tx.output_tokens / mx : 0;
-      const atCeiling = util >= 0.95;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            atCeiling && "text-[var(--color-warn)] font-medium",
-          )}
-          title={
-            mx > 0
-              ? `${fmtInt(tx.output_tokens)} / ${fmtInt(mx)} max (${(util * 100).toFixed(0)}%)`
-              : undefined
-          }
-        >
-          {fmtInt(tx.output_tokens)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Out" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <OutTokensCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.cache_read : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.cache_read(r.tx) : 0),
     id: "cache_read",
-    header: "Cache R",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1
-              ? "text-[var(--color-subtle-foreground)]"
-              : "text-[var(--color-volume)]/80",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtInt(tx.cache_read)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Cache R" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <CacheReadCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_5m ?? 0) : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.cache_5m(r.tx) : 0),
     id: "cache_5m",
-    header: "CW 5m",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const v = tx.cache_creation_5m ?? 0;
-      return (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
-          {fmtInt(v)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="CW 5m" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <CacheWrite5mCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_1h ?? 0) : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.cache_1h(r.tx) : 0),
     id: "cache_1h",
-    header: "CW 1h",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const v = tx.cache_creation_1h ?? 0;
-      return (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
-          {fmtInt(v)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="CW 1h" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <CacheWrite1hCell tx={row.original.tx} /> : null,
   },
   {
     id: "tools",
     header: "Tools",
     enableSorting: false,
-    accessorFn: (r) => {
-      if (!isLeaf(r)) return "";
-      const arr: string[] = r.tx.tools_json ? JSON.parse(r.tx.tools_json) : [];
-      return arr.map(shortToolName).join(" ");
-    },
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-
-      // In-flight: show tool_choice instead of the full available-tools list.
-      if (tx.in_flight === 1 && tx.tool_choice) {
-        const tc = tx.tool_choice;
-        const label = tc.startsWith("tool:")
-          ? shortToolName(tc.slice(5))
-          : tc; // "auto" or "any"
-        return (
-          <div className="flex flex-wrap gap-1 max-w-[22rem]">
-            <span className="chip opacity-60" title={`tool_choice: ${tc}`}>
-              {label}
-            </span>
-          </div>
-        );
-      }
-
-      const raw: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
-      const tools = raw.map(shortToolName);
-      if (tools.length === 0)
-        return (
-          <span className="text-[var(--color-subtle-foreground)] text-xs">
-            —
-          </span>
-        );
-      return (
-        <div className="flex flex-wrap gap-1 max-w-[22rem]">
-          {tools.slice(0, 3).map((t) => (
-            <span key={t} className="chip" title={t}>
-              {t.length > 22 ? t.slice(0, 22) + "…" : t}
-            </span>
-          ))}
-          {tools.length > 3 && (
-            <span className="chip" title={tools.slice(3).join(", ")}>
-              +{tools.length - 3}
-            </span>
-          )}
-        </div>
-      );
-    },
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.tools(r.tx) : ""),
+    filterFn: toolsFilterFn,
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <ToolsCell tx={row.original.tx} /> : null,
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? estimateCostUsd(r.tx) : 0),
+    accessorFn: (r) => (isLeaf(r) ? txAccessors.cost(r.tx) : 0),
     id: "cost",
-    header: "Cost",
-    cell: ({ row }) => {
-      if (!isLeaf(row.original)) return null;
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1
-              ? "text-[var(--color-subtle-foreground)]"
-              : "text-[var(--color-money)]",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtUsd(estimateCostUsd(tx))}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Cost" align="right" />
+    ),
+    cell: ({ row }) =>
+      isLeaf(row.original) ? <CostCell tx={row.original.tx} /> : null,
   },
 ];
-
-const COLUMN_LABELS: Record<string, string> = {
-  when: "When",
-  model: "Model",
-  in: "Input tokens",
-  out: "Output tokens",
-  cache_read: "Cache read",
-  cache_5m: "Cache write 5m",
-  cache_1h: "Cache write 1h",
-  duration: "Duration",
-  tools: "Tools",
-  cost: "Cost",
-};
-
-// Columns whose numeric/cost content is right-aligned. Header cell wrappers
-// use these to match with the data cells so the text actually lines up.
-const RIGHT_ALIGNED_COLS = new Set([
-  "in",
-  "out",
-  "cache_read",
-  "cache_5m",
-  "cache_1h",
-  "duration",
-  "cost",
-]);
 
 const HIDDEN_PER_GROUP = 5;
 const SHOW_MORE_CHUNK = 5;
@@ -516,6 +320,9 @@ export default function RecentTurnsTable({
   );
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = React.useState("");
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
+    [],
+  );
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>({});
   const [shownMap, setShownMap] = React.useState<Record<string, number>>({});
@@ -718,13 +525,20 @@ export default function RecentTurnsTable({
   const table = useReactTable({
     data: data as unknown as UIRow[],
     columns,
-    state: { expanded, sorting, globalFilter, columnVisibility },
+    state: {
+      expanded,
+      sorting,
+      globalFilter,
+      columnFilters,
+      columnVisibility,
+    },
     getRowId: (r) => r.id,
     getSubRows: (r) => (r.kind === "group" ? (r as GroupRow).subRows : undefined),
     getRowCanExpand: (row) => row.original.kind === "group",
     onExpandedChange: setExpanded,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
+    onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
     getCoreRowModel: getCoreRowModel(),
     getExpandedRowModel: getExpandedRowModel(),
@@ -760,9 +574,6 @@ export default function RecentTurnsTable({
   const leafCount = table.getRowModel().rows.filter((r) => r.depth > 0).length;
   const groupCount = data.length;
   const allExpanded = table.getIsAllRowsExpanded();
-  const visibleLeafColumns = table
-    .getAllLeafColumns()
-    .filter((c) => c.getCanHide());
 
   // Stable global model → color mapping, sorted by total frequency across
   // all visible groups. Ensures a model always gets the same swatch color
@@ -780,77 +591,128 @@ export default function RecentTurnsTable({
     return map;
   }, [data]);
 
+  // Pre-compute faceted filter options from the full leaf set. Using a stable
+  // list (not TanStack's per-render facet counts) avoids flicker when the row
+  // set changes rapidly via the bus.
+  const allLeaves = React.useMemo<TransactionRow[]>(() => {
+    const out: TransactionRow[] = [];
+    for (const g of data) {
+      for (const l of g.subRows) out.push(l.tx);
+    }
+    return out;
+  }, [data]);
+
+  const modelOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const tx of allLeaves) {
+      const m = tx.model;
+      if (!m) continue;
+      counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => ({ value: m, label: shortModel(m), count: n }));
+  }, [allLeaves]);
+
+  const stopOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const tx of allLeaves) {
+      const key = txAccessors.stop(tx);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([s, n]) => ({ value: s, label: s, count: n }));
+  }, [allLeaves]);
+
+  const toolOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const tx of allLeaves) {
+      const arr: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
+      for (const t of arr.map(shortToolName)) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([t, n]) => ({ value: t, label: t, count: n }));
+  }, [allLeaves]);
+
   return (
     <section className="card overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-[var(--color-border)]">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h2 className="text-sm font-medium">Recent turns</h2>
-          <span className="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-            {leafCount} turns · {groupCount} sessions
-          </span>
-          {modelColors.size > 0 && (
-            <>
-              <span className="text-[var(--color-subtle-foreground)] text-xs">·</span>
-              <ul className="flex items-center gap-2.5">
-                {[...modelColors.entries()].map(([m, c]) => (
-                  <li
-                    key={m}
-                    className="inline-flex items-center gap-1.5 text-[0.6875rem] text-[var(--color-muted-foreground)] font-mono tabular-nums"
-                  >
-                    <span
-                      className="inline-block w-2 h-2 rounded-sm"
-                      style={{ background: c }}
-                    />
-                    {m}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search
-              size={12}
-              className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--color-subtle-foreground)] pointer-events-none"
-            />
-            <Input
-              placeholder="Filter model, tool, session…"
-              value={globalFilter}
-              onChange={(e) => setGlobalFilter(e.currentTarget.value)}
-              className="h-7 w-56 pl-7 text-xs"
-            />
-          </div>
+      <DataTableToolbar
+        table={table}
+        searchValue={globalFilter}
+        onSearchChange={setGlobalFilter}
+        placeholder="Filter model, tool, session…"
+        columnLabels={COLUMN_LABELS}
+        leading={
+          <>
+            <h2 className="text-sm font-medium">Recent turns</h2>
+            <span className="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+              {leafCount} turns · {groupCount} sessions
+            </span>
+            {modelColors.size > 0 && (
+              <>
+                <span className="text-[var(--color-subtle-foreground)] text-xs">
+                  ·
+                </span>
+                <ul className="flex items-center gap-2.5 flex-wrap">
+                  {[...modelColors.entries()].map(([m, c]) => (
+                    <li
+                      key={m}
+                      className="inline-flex items-center gap-1.5 text-[0.6875rem] text-[var(--color-muted-foreground)] font-mono tabular-nums"
+                    >
+                      <span
+                        className="inline-block w-2 h-2 rounded-sm"
+                        style={{ background: c }}
+                      />
+                      {m}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
+        }
+        filters={
+          <>
+            {modelOptions.length > 1 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("model")}
+                title="Model"
+                options={modelOptions}
+              />
+            )}
+            {stopOptions.length > 1 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("dot")}
+                title="Status"
+                options={stopOptions}
+              />
+            )}
+            {toolOptions.length > 0 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("tools")}
+                title="Tools"
+                options={toolOptions}
+                width="w-[16rem]"
+              />
+            )}
+          </>
+        }
+        trailing={
           <Button
             variant="outline"
             size="sm"
+            className="h-7 text-xs"
             onClick={() => table.toggleAllRowsExpanded(!allExpanded)}
           >
             {allExpanded ? "Collapse all" : "Expand all"}
           </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" aria-label="Column visibility">
-                <SlidersHorizontal size={12} />
-                Columns
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {visibleLeafColumns.map((col) => (
-                <DropdownMenuCheckboxItem
-                  key={col.id}
-                  checked={col.getIsVisible()}
-                  onCheckedChange={(v) => col.toggleVisibility(!!v)}
-                >
-                  {COLUMN_LABELS[col.id] ?? col.id}
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
+        }
+      />
 
       {summaries.length === 0 ? (
         <p className="px-5 py-10 text-[var(--color-muted-foreground)] text-sm text-center">
@@ -862,8 +724,6 @@ export default function RecentTurnsTable({
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id} className="border-t-0 hover:bg-transparent">
                 {hg.headers.map((h) => {
-                  const canSort = h.column.getCanSort();
-                  const dir = h.column.getIsSorted();
                   const isRight = RIGHT_ALIGNED_COLS.has(h.id);
                   return (
                     <TableHead
@@ -874,30 +734,11 @@ export default function RecentTurnsTable({
                         h.id === "when" && "w-16",
                         h.id === "duration" && "w-16",
                         isRight && "text-right",
-                        canSort && "cursor-pointer select-none",
                       )}
-                      onClick={
-                        canSort ? h.column.getToggleSortingHandler() : undefined
-                      }
                     >
-                      {h.isPlaceholder ? null : (
-                        <span
-                          className={cn(
-                            "flex items-center gap-1",
-                            isRight && "justify-end",
-                          )}
-                        >
-                          {flexRender(
-                            h.column.columnDef.header,
-                            h.getContext(),
-                          )}
-                          {canSort && dir && (
-                            <span className="text-[var(--color-foreground)]">
-                              {dir === "asc" ? "↑" : "↓"}
-                            </span>
-                          )}
-                        </span>
-                      )}
+                      {h.isPlaceholder
+                        ? null
+                        : flexRender(h.column.columnDef.header, h.getContext())}
                     </TableHead>
                   );
                 })}
@@ -1229,6 +1070,18 @@ export default function RecentTurnsTable({
                   );
                 }
               }
+              if (out.length === 0) {
+                out.push(
+                  <TableRow key="empty" className="hover:bg-transparent">
+                    <TableCell
+                      colSpan={visibleColCount}
+                      className="py-10 text-center text-xs text-[var(--color-muted-foreground)]"
+                    >
+                      No turns match the current filters.
+                    </TableCell>
+                  </TableRow>,
+                );
+              }
               return out;
             })()}
           </TableBody>
@@ -1237,44 +1090,3 @@ export default function RecentTurnsTable({
     </section>
   );
 }
-
-function ModelMixInline({
-  models,
-  turns,
-  colorFor,
-}: {
-  models: Map<string, number>;
-  turns: number;
-  colorFor: (model: string) => string;
-}) {
-  const sorted = React.useMemo(
-    () => [...models.entries()].sort((a, b) => b[1] - a[1]),
-    [models],
-  );
-  const title = sorted
-    .map(([m, n]) => `${m} ×${n} (${Math.round((n / turns) * 100)}%)`)
-    .join("\n");
-  return (
-    <span
-      className="inline-flex overflow-hidden rounded-sm bg-[var(--color-border)]"
-      style={{ width: 72, height: 6 }}
-      aria-hidden="true"
-      title={title}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {sorted.map(([label, n]) => (
-        <span
-          key={label}
-          style={{
-            flex: `${Math.max((n / turns) * 100, 2)} 0 0`,
-            minWidth: 1,
-            background: colorFor(label),
-          }}
-        />
-      ))}
-    </span>
-  );
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-type _RowType = Row<UIRow>;

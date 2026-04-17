@@ -6,17 +6,11 @@ import {
   getSortedRowModel,
   useReactTable,
   type ColumnDef,
+  type ColumnFiltersState,
   type SortingState,
   type VisibilityState,
 } from "@tanstack/react-table";
-import {
-  ChevronDown,
-  ChevronRight,
-  Loader2,
-  SlidersHorizontal,
-  Search,
-  Sparkles,
-} from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -25,40 +19,40 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  DataTableColumnHeader,
+  DataTableFacetedFilter,
+  DataTableToolbar,
+  type FacetOption,
+} from "@/components/ui/data-table";
 import type { TransactionRow } from "@/lib/store";
-import {
-  estimateCostUsd,
-  fmtAgo,
-  fmtDuration,
-  fmtInt,
-  fmtUsd,
-} from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
-import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
 import { TurnDetail } from "@/components/TurnDetail";
+import {
+  CacheReadCell,
+  CacheWrite1hCell,
+  CacheWrite5mCell,
+  COLUMN_LABELS,
+  CostCell,
+  DurationCell,
+  InTokensCell,
+  ModelCell,
+  OutTokensCell,
+  RIGHT_ALIGNED_COLS,
+  shortModel,
+  StopDot,
+  ToolsCell,
+  txAccessors,
+  WhenCell,
+} from "@/components/table-cells";
 
 type TurnRow = {
   tx: TransactionRow;
-  index: number; // 1-based turn position within this session
+  /** 1-based turn position within this session. */
+  index: number;
 };
-
-function shortModel(m: string | null | undefined): string {
-  if (!m) return "—";
-  return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
-}
-
 
 function toTurns(rows: TransactionRow[], sessionId: string): TurnRow[] {
   return rows
@@ -69,18 +63,29 @@ function toTurns(rows: TransactionRow[], sessionId: string): TurnRow[] {
     .map((tx, i) => ({ tx, index: i + 1 }));
 }
 
+/** Filter fn: row.getValue(id) is the space-separated tool string from txAccessors.tools. */
+function toolsFilterFn(
+  row: { getValue: (id: string) => unknown },
+  id: string,
+  value: string[],
+): boolean {
+  if (!Array.isArray(value) || value.length === 0) return true;
+  const hay = String(row.getValue(id) ?? "").split(" ").filter(Boolean);
+  return value.some((f) => hay.includes(f));
+}
+
 const columns: ColumnDef<TurnRow>[] = [
   {
     id: "expand",
     header: () => null,
     enableSorting: false,
     enableHiding: false,
-    cell: () => null, // rendered manually below to support row-level onClick
+    cell: () => null,
   },
   {
     accessorFn: (r) => r.index,
     id: "turn",
-    header: "#",
+    header: ({ column }) => <DataTableColumnHeader column={column} title="#" />,
     sortingFn: "basic",
     cell: ({ row }) => (
       <span className="font-mono text-xs text-[var(--color-subtle-foreground)] tabular-nums">
@@ -93,298 +98,89 @@ const columns: ColumnDef<TurnRow>[] = [
     header: () => null,
     enableSorting: false,
     enableHiding: false,
-    cell: ({ row }) => {
-      const r = row.original.tx;
-      if (r.in_flight === 1) {
-        return (
-          <Loader2
-            size={10}
-            className="animate-spin text-[var(--color-subtle-foreground)]"
-            aria-label="in flight"
-          />
-        );
-      }
-      const cls = stopDotClass(r.stop_reason);
-      if (!cls) return null;
-      return (
-        <span
-          className={cn("dot", cls)}
-          title={r.stop_reason ?? "—"}
-          style={{ marginRight: 0 }}
-        />
-      );
-    },
+    accessorFn: (r) => txAccessors.stop(r.tx),
+    filterFn: "arrIncludesSome",
+    cell: ({ row }) => <StopDot tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.ts + r.tx.elapsed_ms,
+    accessorFn: (r) => txAccessors.when(r.tx),
     id: "when",
-    header: "When",
+    header: ({ column }) => <DataTableColumnHeader column={column} title="When" />,
     sortingFn: "basic",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
-      return (
-        <span
-          data-ts={finishedAt}
-          className="text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap"
-        >
-          {fmtAgo(finishedAt)}
-        </span>
-      );
-    },
+    cell: ({ row }) => <WhenCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.elapsed_ms,
+    accessorFn: (r) => txAccessors.duration(r.tx),
     id: "duration",
-    header: "Duration",
-    cell: ({ row }) => (
-      <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-        {row.original.tx.in_flight === 1
-          ? "—"
-          : fmtDuration(row.original.tx.elapsed_ms)}
-      </span>
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Duration" align="right" />
     ),
+    cell: ({ row }) => <DurationCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.model ?? "",
+    accessorFn: (r) => txAccessors.model(r.tx),
     id: "model",
-    header: "Model",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      const inflight = tx.in_flight === 1;
-      const m = tx.model;
-      const thought = (tx.thinking_blocks ?? 0) > 0;
-      const budget = tx.thinking_budget ?? null;
-      return (
-        <span
-          className={cn(
-            "font-mono text-xs inline-flex items-center gap-1.5 whitespace-nowrap",
-            inflight && "text-[var(--color-subtle-foreground)]",
-          )}
-        >
-          <span title={m ?? "—"}>{shortModel(m)}</span>
-          {(thought || budget != null) && (
-            <span
-              className="inline-flex items-center gap-0.5 text-[var(--color-chart-4)]"
-              title={`extended thinking${thought ? ` · ${tx.thinking_blocks} block${(tx.thinking_blocks ?? 0) > 1 ? "s" : ""}` : inflight ? " budget set" : " budget set, not used this turn"}${budget ? ` · budget ${fmtInt(budget)}` : ""}`}
-            >
-              <Sparkles size={10} className="shrink-0" aria-label="extended thinking" />
-              {budget != null && (
-                <span className="tabular-nums text-[0.625rem]">
-                  {budget >= 1000 ? `${Math.round(budget / 1000)}k` : budget}
-                </span>
-              )}
-            </span>
-          )}
-        </span>
-      );
-    },
+    header: ({ column }) => <DataTableColumnHeader column={column} title="Model" />,
+    filterFn: "arrIncludesSome",
+    cell: ({ row }) => <ModelCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.input_tokens,
+    accessorFn: (r) => txAccessors.in(r.tx),
     id: "in",
-    header: "In",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1 && "text-[var(--color-subtle-foreground)]",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtInt(tx.input_tokens)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="In" align="right" />
+    ),
+    cell: ({ row }) => <InTokensCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.output_tokens,
+    accessorFn: (r) => txAccessors.out(r.tx),
     id: "out",
-    header: "Out",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const mx = tx.max_tokens ?? 0;
-      const util = mx > 0 ? tx.output_tokens / mx : 0;
-      const atCeiling = util >= 0.95;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            atCeiling && "text-[var(--color-warn)] font-medium",
-          )}
-          title={
-            mx > 0
-              ? `${fmtInt(tx.output_tokens)} / ${fmtInt(mx)} max (${(util * 100).toFixed(0)}%)`
-              : undefined
-          }
-        >
-          {fmtInt(tx.output_tokens)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Out" align="right" />
+    ),
+    cell: ({ row }) => <OutTokensCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.cache_read,
+    accessorFn: (r) => txAccessors.cache_read(r.tx),
     id: "cache_read",
-    header: "Cache R",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1
-              ? "text-[var(--color-subtle-foreground)]"
-              : "text-[var(--color-volume)]/80",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtInt(tx.cache_read)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Cache R" align="right" />
+    ),
+    cell: ({ row }) => <CacheReadCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.cache_creation_5m ?? 0,
+    accessorFn: (r) => txAccessors.cache_5m(r.tx),
     id: "cache_5m",
-    header: "CW 5m",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const v = tx.cache_creation_5m ?? 0;
-      return (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
-          {fmtInt(v)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="CW 5m" align="right" />
+    ),
+    cell: ({ row }) => <CacheWrite5mCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => r.tx.cache_creation_1h ?? 0,
+    accessorFn: (r) => txAccessors.cache_1h(r.tx),
     id: "cache_1h",
-    header: "CW 1h",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      if (tx.in_flight === 1) {
-        return (
-          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-            —
-          </span>
-        );
-      }
-      const v = tx.cache_creation_1h ?? 0;
-      return (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
-          {fmtInt(v)}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="CW 1h" align="right" />
+    ),
+    cell: ({ row }) => <CacheWrite1hCell tx={row.original.tx} />,
   },
   {
     id: "tools",
     header: "Tools",
     enableSorting: false,
-    accessorFn: (r) => {
-      const arr: string[] = r.tx.tools_json ? JSON.parse(r.tx.tools_json) : [];
-      return arr.map(shortToolName).join(" ");
-    },
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-
-      if (tx.in_flight === 1 && tx.tool_choice) {
-        const tc = tx.tool_choice;
-        const label = tc.startsWith("tool:")
-          ? shortToolName(tc.slice(5))
-          : tc;
-        return (
-          <div className="flex flex-wrap gap-1 max-w-[22rem]">
-            <span className="chip opacity-60" title={`tool_choice: ${tc}`}>
-              {label}
-            </span>
-          </div>
-        );
-      }
-
-      const raw: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
-      const tools = raw.map(shortToolName);
-      if (tools.length === 0)
-        return (
-          <span className="text-[var(--color-subtle-foreground)] text-xs">—</span>
-        );
-      return (
-        <div className="flex flex-wrap gap-1 max-w-[22rem]">
-          {tools.slice(0, 3).map((t) => (
-            <span key={t} className="chip" title={t}>
-              {t.length > 22 ? t.slice(0, 22) + "…" : t}
-            </span>
-          ))}
-          {tools.length > 3 && (
-            <span className="chip" title={tools.slice(3).join(", ")}>
-              +{tools.length - 3}
-            </span>
-          )}
-        </div>
-      );
-    },
+    accessorFn: (r) => txAccessors.tools(r.tx),
+    filterFn: toolsFilterFn,
+    cell: ({ row }) => <ToolsCell tx={row.original.tx} />,
   },
   {
-    accessorFn: (r) => estimateCostUsd(r.tx),
+    accessorFn: (r) => txAccessors.cost(r.tx),
     id: "cost",
-    header: "Cost",
-    cell: ({ row }) => {
-      const tx = row.original.tx;
-      return (
-        <span
-          className={cn(
-            "block text-right font-mono text-xs tabular-nums",
-            tx.in_flight === 1
-              ? "text-[var(--color-subtle-foreground)]"
-              : "text-[var(--color-money)]",
-          )}
-        >
-          {tx.in_flight === 1 ? "—" : fmtUsd(estimateCostUsd(tx))}
-        </span>
-      );
-    },
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Cost" align="right" />
+    ),
+    cell: ({ row }) => <CostCell tx={row.original.tx} />,
   },
 ];
-
-const COLUMN_LABELS: Record<string, string> = {
-  turn: "Turn #",
-  when: "When",
-  model: "Model",
-  in: "Input tokens",
-  out: "Output tokens",
-  cache_read: "Cache read",
-  cache_5m: "Cache write 5m",
-  cache_1h: "Cache write 1h",
-  duration: "Duration",
-  tools: "Tools",
-  cost: "Cost",
-};
-
-const RIGHT_ALIGNED_COLS = new Set([
-  "in",
-  "out",
-  "cache_read",
-  "cache_5m",
-  "cache_1h",
-  "duration",
-  "cost",
-]);
 
 export default function SessionTurnsTable({
   initialRows,
@@ -398,6 +194,9 @@ export default function SessionTurnsTable({
     { id: "turn", desc: true },
   ]);
   const [globalFilter, setGlobalFilter] = React.useState("");
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
+    [],
+  );
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>({});
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
@@ -409,6 +208,45 @@ export default function SessionTurnsTable({
     () => toTurns(rows, sessionId),
     [rows, sessionId],
   );
+
+  // Pre-compute faceted option lists so they reflect the full dataset (not just
+  // the currently-filtered slice) and give stable ordering.
+  const modelOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const r of data) {
+      const m = r.tx.model;
+      if (!m) continue;
+      counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => ({ value: m, label: shortModel(m), count: n }));
+  }, [data]);
+
+  const stopOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const r of data) {
+      const key = txAccessors.stop(r.tx);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([s, n]) => ({ value: s, label: s, count: n }));
+  }, [data]);
+
+  const toolOptions = React.useMemo<FacetOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const r of data) {
+      const arr: string[] = r.tx.tools_json ? JSON.parse(r.tx.tools_json) : [];
+      for (const t of arr.map(shortToolName)) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([t, n]) => ({ value: t, label: t, count: n }));
+  }, [data]);
 
   // Deep-link handling: if the URL fragment is #<tx_id> (set by command palette
   // result links), auto-expand that turn, scroll it into view, and flash a
@@ -457,10 +295,11 @@ export default function SessionTurnsTable({
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, globalFilter, columnVisibility },
+    state: { sorting, globalFilter, columnFilters, columnVisibility },
     getRowId: (r) => r.tx.tx_id,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
+    onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -481,56 +320,51 @@ export default function SessionTurnsTable({
     },
   });
 
-  const visibleLeafColumns = table
-    .getAllLeafColumns()
-    .filter((c) => c.getCanHide());
   const visibleColCount = table.getVisibleLeafColumns().length;
 
   return (
     <section className="card overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-[var(--color-border)]">
-        <div className="flex items-center gap-3">
-          <h2 className="text-sm font-medium">Turns</h2>
-          <span className="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-            {data.length} {data.length === 1 ? "turn" : "turns"}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search
-              size={12}
-              className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--color-subtle-foreground)] pointer-events-none"
-            />
-            <Input
-              placeholder="Filter model, tool, url…"
-              value={globalFilter}
-              onChange={(e) => setGlobalFilter(e.currentTarget.value)}
-              className="h-7 w-56 pl-7 text-xs"
-            />
-          </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" aria-label="Column visibility">
-                <SlidersHorizontal size={12} />
-                Columns
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {visibleLeafColumns.map((col) => (
-                <DropdownMenuCheckboxItem
-                  key={col.id}
-                  checked={col.getIsVisible()}
-                  onCheckedChange={(v) => col.toggleVisibility(!!v)}
-                >
-                  {COLUMN_LABELS[col.id] ?? col.id}
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
+      <DataTableToolbar
+        table={table}
+        searchValue={globalFilter}
+        onSearchChange={setGlobalFilter}
+        placeholder="Filter model, tool, url…"
+        columnLabels={COLUMN_LABELS}
+        leading={
+          <>
+            <h2 className="text-sm font-medium">Turns</h2>
+            <span className="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+              {data.length} {data.length === 1 ? "turn" : "turns"}
+            </span>
+          </>
+        }
+        filters={
+          <>
+            {modelOptions.length > 1 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("model")}
+                title="Model"
+                options={modelOptions}
+              />
+            )}
+            {stopOptions.length > 1 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("dot")}
+                title="Status"
+                options={stopOptions}
+              />
+            )}
+            {toolOptions.length > 0 && (
+              <DataTableFacetedFilter
+                column={table.getColumn("tools")}
+                title="Tools"
+                options={toolOptions}
+                width="w-[16rem]"
+              />
+            )}
+          </>
+        }
+      />
 
       {data.length === 0 ? (
         <p className="px-5 py-10 text-[var(--color-muted-foreground)] text-sm text-center">
@@ -542,8 +376,6 @@ export default function SessionTurnsTable({
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id} className="border-t-0 hover:bg-transparent">
                 {hg.headers.map((h) => {
-                  const canSort = h.column.getCanSort();
-                  const dir = h.column.getIsSorted();
                   const isRight = RIGHT_ALIGNED_COLS.has(h.id);
                   return (
                     <TableHead
@@ -555,30 +387,11 @@ export default function SessionTurnsTable({
                         h.id === "when" && "w-16",
                         h.id === "duration" && "w-16",
                         isRight && "text-right",
-                        canSort && "cursor-pointer select-none",
                       )}
-                      onClick={
-                        canSort ? h.column.getToggleSortingHandler() : undefined
-                      }
                     >
-                      {h.isPlaceholder ? null : (
-                        <span
-                          className={cn(
-                            "flex items-center gap-1",
-                            isRight && "justify-end",
-                          )}
-                        >
-                          {flexRender(
-                            h.column.columnDef.header,
-                            h.getContext(),
-                          )}
-                          {canSort && dir && (
-                            <span className="text-[var(--color-foreground)]">
-                              {dir === "asc" ? "↑" : "↓"}
-                            </span>
-                          )}
-                        </span>
-                      )}
+                      {h.isPlaceholder
+                        ? null
+                        : flexRender(h.column.columnDef.header, h.getContext())}
                     </TableHead>
                   );
                 })}
@@ -646,6 +459,16 @@ export default function SessionTurnsTable({
                 </React.Fragment>
               );
             })}
+            {table.getRowModel().rows.length === 0 && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell
+                  colSpan={visibleColCount}
+                  className="py-10 text-center text-xs text-[var(--color-muted-foreground)]"
+                >
+                  No turns match the current filters.
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       )}
