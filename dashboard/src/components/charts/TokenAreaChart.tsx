@@ -27,6 +27,8 @@ interface Props {
   xTickFormatter: (v: number) => string;
   xLabelFormatter?: (v: unknown) => string;
   yScale: "log" | "linear";
+  /** For linear scale: force ticks at this step (e.g. 10_000). Ignored on log. */
+  linearTickStep?: number;
   /** Unique prefix for SVG <defs> ids (avoids collisions when >1 chart on page). */
   instanceId: string;
   /** Enable recharts Brush slider beneath the chart. */
@@ -68,6 +70,17 @@ function logTicks(ceiling: number): number[] {
   return ticks;
 }
 
+// Linear ticks at a fixed step up to the smallest multiple ≥ max.
+// Used on the overview chart so token magnitudes read as plain 10k/20k/…
+// rather than the log decades, even though cache_read dominates visually.
+function linearTicksAtStep(max: number, step: number): number[] {
+  if (!Number.isFinite(max) || max <= 0) return [0, step];
+  const ceiling = Math.ceil(max / step) * step;
+  const ticks: number[] = [];
+  for (let v = 0; v <= ceiling; v += step) ticks.push(v);
+  return ticks;
+}
+
 const TOKEN_KEYS: readonly (keyof TokenAreaPoint)[] = [
   "cache_read",
   "cache_creation",
@@ -81,6 +94,7 @@ export default function TokenAreaChart({
   xTickFormatter,
   xLabelFormatter,
   yScale,
+  linearTickStep,
   instanceId,
   showBrush = false,
   showCostDots = false,
@@ -135,13 +149,9 @@ export default function TokenAreaChart({
     [instanceId],
   );
 
-  // Log scale only: compute the highest token value across all series, then
-  // round the domain up to the next power of 10 so there's always a labeled
-  // tick above the data. Linear scale uses recharts' built-in "nice" ticks.
-  const { logDomain, logTickValues } = useMemo(() => {
-    if (yScale !== "log") {
-      return { logDomain: undefined, logTickValues: undefined };
-    }
+  // Compute domain + ticks for the token axis. Log snaps to 1/2/5 × 10ⁿ;
+  // linear with a fixed step produces flat 10k/20k/… ticks for readability.
+  const { yDomain, yTicks } = useMemo(() => {
     let m = 1;
     for (const d of data) {
       for (const k of TOKEN_KEYS) {
@@ -149,12 +159,22 @@ export default function TokenAreaChart({
         if (typeof v === "number" && v > m) m = v;
       }
     }
-    const ceiling = logCeiling(m);
-    return {
-      logDomain: [1, ceiling] as [number, number],
-      logTickValues: logTicks(ceiling),
-    };
-  }, [data, yScale]);
+    if (yScale === "log") {
+      const ceiling = logCeiling(m);
+      return {
+        yDomain: [1, ceiling] as [number, number],
+        yTicks: logTicks(ceiling),
+      };
+    }
+    if (linearTickStep && linearTickStep > 0) {
+      const ticks = linearTicksAtStep(m, linearTickStep);
+      return {
+        yDomain: [0, ticks[ticks.length - 1]] as [number, number],
+        yTicks: ticks,
+      };
+    }
+    return { yDomain: undefined, yTicks: undefined };
+  }, [data, yScale, linearTickStep]);
 
   return (
     <div
@@ -206,8 +226,8 @@ export default function TokenAreaChart({
           <YAxis
             yAxisId="tokens"
             scale={yScale}
-            domain={logDomain}
-            ticks={logTickValues}
+            domain={yDomain}
+            ticks={yTicks}
             tickFormatter={fmtTokens}
             axisLine={false}
             tickLine={false}
@@ -238,8 +258,8 @@ export default function TokenAreaChart({
             )}
           />
           {/* Render order: largest series first so smaller ones stay visible on top.
-              Areas are independent (not stacked) — log scale makes stacking invalid
-              and linear scale looks busy. Each series gets its own gradient fill. */}
+              Areas are independent (not stacked): stacking is meaningless on log
+              and busy on linear. Each series gets its own gradient fill. */}
           <Area
             yAxisId="tokens"
             type="monotone"

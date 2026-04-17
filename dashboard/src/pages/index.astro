@@ -322,7 +322,7 @@ const rateLimit =
           </div>
         </div>
         <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
-          Token composition (log scale) with cost overlay. {chartData.length} turns across {win} window{["24h", "3d", "7d"].includes(win) ? " · avg per turn" : ""}.
+          Token composition with cost overlay. {chartData.length} turns across {win} window{["24h", "3d", "7d"].includes(win) ? " · avg per turn" : ""}.
         </p>
         <TokenChart client:load initialRows={rows} window={win} />
       </section>
