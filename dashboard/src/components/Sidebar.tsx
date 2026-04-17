@@ -12,12 +12,19 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
+import { useHydrated } from "@/hooks/use-hydrated";
 
 const COLLAPSE_KEY = "sidebar:collapsed";
 
@@ -34,6 +41,7 @@ export function Sidebar({
 }) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
+  const [mobileOpen, setMobileOpen] = React.useState(false);
   const [currentPath, setCurrentPath] = React.useState<string>("/");
   const [sessions, setSessions] = React.useState<SessionSummary[]>(initialSessions);
 
@@ -48,6 +56,10 @@ export function Sidebar({
   }, []);
 
   // 1s tick so relative timestamps ("3s", "1m") update live between polls.
+  // `hydrated` gates the first fmtAgo() render: server emits "" so SSR +
+  // hydration agree, then the first effect tick (+1s) populates the time.
+  // Avoids React #418 hydration mismatch from clock drift.
+  const hydrated = useHydrated();
   const [, setNowTick] = React.useState(0);
   React.useEffect(() => {
     const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
@@ -121,6 +133,14 @@ export function Sidebar({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Mobile sheet trigger lives in Base.astro's header (visible <md). It
+  // dispatches `cm:open-mobile-sidebar` instead of importing React state.
+  React.useEffect(() => {
+    const onOpen = () => setMobileOpen(true);
+    window.addEventListener("cm:open-mobile-sidebar", onOpen);
+    return () => window.removeEventListener("cm:open-mobile-sidebar", onOpen);
+  }, []);
+
   const onOverview = currentPath === "/";
   const activeCount = sessions.filter((s) => s.active).length;
 
@@ -128,7 +148,7 @@ export function Sidebar({
     <TooltipProvider delayDuration={0}>
       <aside
         className={cn(
-          "sticky top-0 h-screen flex flex-col border-r border-[var(--color-border)] bg-[var(--color-background)]/95 backdrop-blur-sm transition-[width] duration-200 ease-out shrink-0",
+          "hidden md:flex sticky top-0 h-screen flex-col border-r border-[var(--color-border)] bg-[var(--color-background)]/95 backdrop-blur-sm transition-[width] duration-200 ease-out shrink-0",
           collapsed ? "w-14" : "w-60",
         )}
         aria-label="Primary"
@@ -207,6 +227,7 @@ export function Sidebar({
                       key={s.id}
                       s={s}
                       current={s.id === currentSessionId}
+                      hydrated={hydrated}
                     />
                   ))}
                 </ul>
@@ -259,6 +280,64 @@ export function Sidebar({
           </>
         )}
       </aside>
+
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <SheetContent
+          side="left"
+          className="w-72 p-0 bg-[var(--color-background)] border-[var(--color-border)] flex flex-col"
+        >
+          <SheetHeader className="h-14 px-4 flex-row items-center justify-between border-b border-[var(--color-border)] space-y-0">
+            <SheetTitle className="flex items-center gap-2 text-[0.95rem] font-semibold tracking-tight">
+              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[var(--color-money)]" />
+              llmetry
+            </SheetTitle>
+          </SheetHeader>
+          <div className="p-2 flex flex-col gap-1">
+            <SearchTrigger
+              collapsed={false}
+              onClick={() => {
+                setMobileOpen(false);
+                setPaletteOpen(true);
+              }}
+            />
+            <NavLink
+              href="/"
+              label="Overview"
+              Icon={Home}
+              active={onOverview}
+              collapsed={false}
+            />
+          </div>
+          <Separator className="bg-[var(--color-border)]" />
+          <div className="px-3 pt-3 pb-1 flex items-baseline justify-between">
+            <span className="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)]">
+              Sessions
+            </span>
+            <span className="text-[10px] tabular-nums font-mono text-[var(--color-subtle-foreground)]">
+              {activeCount > 0 ? `${activeCount} active · ` : ""}
+              {sessions.length}
+            </span>
+          </div>
+          <ScrollArea className="flex-1 min-h-0 px-2 pb-3">
+            {sessions.length === 0 ? (
+              <p className="px-2 py-4 text-[11px] text-[var(--color-subtle-foreground)]">
+                No sessions yet.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-0.5">
+                {sessions.map((s) => (
+                  <SessionItem
+                    key={s.id}
+                    s={s}
+                    current={s.id === currentSessionId}
+                    hydrated={hydrated}
+                  />
+                ))}
+              </ul>
+            )}
+          </ScrollArea>
+        </SheetContent>
+      </Sheet>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </TooltipProvider>
@@ -354,9 +433,11 @@ function NavLink({
 function SessionItem({
   s,
   current,
+  hydrated,
 }: {
   s: SessionSummary;
   current: boolean;
+  hydrated: boolean;
 }) {
   return (
     <li>
@@ -383,8 +464,11 @@ function SessionItem({
           >
             {shortSession(s.id)}
           </code>
-          <span className="ml-auto text-[9.5px] tabular-nums font-mono text-[var(--color-subtle-foreground)]">
-            {fmtAgo(s.lastTs)}
+          <span
+            className="ml-auto text-[9.5px] tabular-nums font-mono text-[var(--color-subtle-foreground)]"
+            suppressHydrationWarning
+          >
+            {hydrated ? fmtAgo(s.lastTs) : ""}
           </span>
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-[10px] font-mono text-[var(--color-subtle-foreground)] tabular-nums">

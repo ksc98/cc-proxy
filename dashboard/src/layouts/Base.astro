@@ -74,6 +74,14 @@ function fmtBurn(n: number): string {
     <header class="sticky top-0 z-20 backdrop-blur-xl bg-[var(--color-background)]/80 border-b border-[var(--color-border)]">
       <div class="px-4 sm:px-6 h-14 flex items-center justify-between gap-3 sm:gap-6">
         <div class="flex items-center gap-3 sm:gap-6 min-w-0">
+          <button
+            type="button"
+            id="cm-mobile-sidebar-trigger"
+            class="md:hidden inline-flex items-center justify-center h-8 w-8 -ml-1 rounded-md text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-card)]"
+            aria-label="Open navigation"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+          </button>
           <span class="text-xs text-[var(--color-muted-foreground)] hidden sm:inline whitespace-nowrap">Claude Code observability</span>
           {
             headerStats && (
@@ -210,6 +218,12 @@ function fmtBurn(n: number): string {
     </div>
 
     <script>
+      // --- Mobile sidebar trigger: dispatch event consumed by Sidebar.tsx ---
+      const trigger = document.getElementById("cm-mobile-sidebar-trigger");
+      trigger?.addEventListener("click", () => {
+        window.dispatchEvent(new CustomEvent("cm:open-mobile-sidebar"));
+      });
+
       // --- 1-second ticker for every [data-ts] element. ---
       // Updates inner text to the current "Xs / Xm / Xh / Xd" ago value.
       function fmtAgo(ms: number): string {

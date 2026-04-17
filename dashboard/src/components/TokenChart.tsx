@@ -3,6 +3,7 @@ import type { TransactionRow } from "@/lib/store";
 import { estimateCostUsd } from "@/lib/format";
 import { subscribeRows } from "@/lib/rowsBus";
 import type { Window } from "@/lib/pillWindow";
+import { useHydrated } from "@/hooks/use-hydrated";
 import TokenAreaChart, { type TokenAreaPoint } from "./charts/TokenAreaChart";
 
 type Point = TokenAreaPoint & { ts: number };
@@ -118,7 +119,13 @@ export default function TokenChart({
   // hundreds of points.
   const showBrush = win === "3d" || win === "7d";
 
-  if (data.length === 0) return null;
+  // fmtTs uses the user's local timezone (Date.prototype.getHours), but
+  // Cloudflare Workers SSR runs in UTC. Rendering the chart on SSR would
+  // emit UTC tick labels that don't match the client's first paint, which
+  // trips React #418. Defer rendering until after hydration so SSR + first
+  // hydration paint both emit nothing, then the real chart pops in.
+  const hydrated = useHydrated();
+  if (!hydrated || data.length === 0) return null;
   return (
     <TokenAreaChart
       data={data}

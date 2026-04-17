@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Loader2, Sparkles } from "lucide-react";
 import type { TransactionRow } from "@/lib/store";
+import { useHydrated } from "@/hooks/use-hydrated";
 import {
   estimateCostUsd,
   fmtAgo,
@@ -65,12 +66,18 @@ export function StopDot({ tx }: { tx: TransactionRow }) {
 
 export function WhenCell({ tx }: { tx: TransactionRow }) {
   const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
+  // Render the empty span on SSR + first hydration paint, then fill in
+  // once the client has fully mounted. Base.astro's global 1s ticker
+  // populates the text immediately after via the `data-ts` attribute,
+  // and React's own re-renders take over from there. Prevents React #418.
+  const hydrated = useHydrated();
   return (
     <span
       data-ts={finishedAt}
       className="text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap"
+      suppressHydrationWarning
     >
-      {fmtAgo(finishedAt)}
+      {hydrated ? fmtAgo(finishedAt) : ""}
     </span>
   );
 }
