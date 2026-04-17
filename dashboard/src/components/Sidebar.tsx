@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { useHydrated } from "@/hooks/use-hydrated";
+import { seedSessions, subscribeSessions } from "@/lib/sessionsBus";
 
 const COLLAPSE_KEY = "sidebar:collapsed";
 
@@ -66,40 +67,15 @@ export function Sidebar({
     return () => window.clearInterval(id);
   }, []);
 
-  // Refresh session list on WS events (turn complete / session end).
+  // Refresh session list on WS events via the shared sessionsBus. The
+  // bus dedupes simultaneous fetches across subscribers (previously
+  // Sidebar and RecentTurnsTable each kicked off their own request on
+  // every turn_complete, so a single event cost two identical 5kB
+  // sessions.json round-trips).
   React.useEffect(() => {
-    let cancelled = false;
-    let inflight = false;
-    const tick = async () => {
-      if (inflight || document.hidden) return;
-      inflight = true;
-      try {
-        const res = await fetch("/api/sessions.json", {
-          credentials: "include",
-          cache: "no-store",
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as SessionSummary[];
-        if (!cancelled && Array.isArray(data)) setSessions(data);
-      } catch {
-        /* next event will retry */
-      } finally {
-        inflight = false;
-      }
-    };
-    window.addEventListener("cm:turn-complete", tick);
-    window.addEventListener("cm:session-end", tick);
-    const onVis = () => {
-      if (!document.hidden) void tick();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("cm:turn-complete", tick);
-      window.removeEventListener("cm:session-end", tick);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, []);
+    seedSessions(initialSessions);
+    return subscribeSessions(setSessions);
+  }, [initialSessions]);
 
   const toggle = React.useCallback(() => {
     setCollapsed((prev) => {

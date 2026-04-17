@@ -39,6 +39,7 @@ import { fmtDuration, fmtUsd } from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
+import { seedSessions, subscribeSessions } from "@/lib/sessionsBus";
 import { TurnDetail } from "@/components/TurnDetail";
 import { ModelMixInline } from "@/components/ModelMixInline";
 import {
@@ -356,35 +357,15 @@ export default function RecentTurnsTable({
     setShownMap((p) => ({ ...p, [id]: HIDDEN_PER_GROUP }));
   }, []);
 
-  // Poll the sidebar's sessions endpoint on the same cadence as Sidebar.tsx
-  // (5 s) so the session headers stay current — turns count, cost, active
-  // state, and ordering all come from summaries, not from raw rows.
+  // Subscribe to the shared sessionsBus instead of running our own poll
+  // — Sidebar owns/seeds the bus, we just reflect its updates so that
+  // session headers (turns count, cost, active state, ordering) stay
+  // current. Previously both components fired identical sessions.json
+  // fetches on every turn_complete.
   React.useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      if (typeof document !== "undefined" && document.hidden) return;
-      try {
-        const res = await fetch("/api/sessions.json", { cache: "no-store" });
-        if (!res.ok || cancelled) return;
-        const data = (await res.json()) as SessionSummary[];
-        if (!cancelled && Array.isArray(data)) setSummaries(data);
-      } catch {
-        /* next event will retry */
-      }
-    };
-    window.addEventListener("cm:turn-complete", tick);
-    window.addEventListener("cm:session-end", tick);
-    const onVis = () => {
-      if (!document.hidden) void tick();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("cm:turn-complete", tick);
-      window.removeEventListener("cm:session-end", tick);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, []);
+    seedSessions(initialSummaries);
+    return subscribeSessions(setSummaries);
+  }, [initialSummaries]);
 
   // Merge live windowed rows (from the /api/recent poll) into the sessions
   // we've already loaded. Collapsed sessions stay collapsed with no
