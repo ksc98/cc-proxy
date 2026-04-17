@@ -48,18 +48,23 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-// Next power of 10 above `max`. recharts' log-scale tick auto-picker stops
-// at the largest power of 10 ≤ dataMax, so without this the top tick reads
-// "100k" even when the real max is 428k. +1 on the exponent also handles
-// exact-power inputs so the domain always exceeds the data.
+// Snap the log-axis top to a 1/2/5 × 10^n "nice" value just above the data
+// max. Without this, rounding to the next decade (e.g. 428k → 1M) wastes
+// ~70% of the top as empty space. The 1/2/5 progression is the standard
+// "nice number" sequence for axis scales.
 function logCeiling(max: number): number {
   if (!Number.isFinite(max) || max <= 1) return 10;
-  return Math.pow(10, Math.floor(Math.log10(max)) + 1);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(max)));
+  const ratio = max / magnitude;
+  if (ratio < 2) return magnitude * 2;
+  if (ratio < 5) return magnitude * 5;
+  return magnitude * 10;
 }
 
 function logTicks(ceiling: number): number[] {
   const ticks: number[] = [];
-  for (let v = 1; v <= ceiling; v *= 10) ticks.push(v);
+  for (let v = 1; v < ceiling; v *= 10) ticks.push(v);
+  if (ticks[ticks.length - 1] !== ceiling) ticks.push(ceiling);
   return ticks;
 }
 
