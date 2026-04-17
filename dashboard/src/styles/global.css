@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:is(.dark *));
+
 @theme {
   --font-sans:
     "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -50,6 +52,38 @@
   font-feature-settings: "cv11", "ss01";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* shadcn/ui compatibility tokens — all mapped to our dark palette. */
+  --radius: 0.625rem;
+  --background: var(--color-background);
+  --foreground: var(--color-foreground);
+  --card: var(--color-card);
+  --card-foreground: var(--color-foreground);
+  --popover: var(--color-card-elevated);
+  --popover-foreground: var(--color-foreground);
+  --primary: var(--color-foreground);
+  --primary-foreground: var(--color-background);
+  --secondary: var(--color-card-elevated);
+  --secondary-foreground: var(--color-foreground);
+  --muted: var(--color-card);
+  --muted-foreground: var(--color-muted-foreground);
+  --accent: var(--color-card-elevated);
+  --accent-foreground: var(--color-foreground);
+  --destructive: var(--color-danger);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: var(--color-border);
+  --input: var(--color-border);
+  --ring: var(--color-border-strong);
+
+  /* Sidebar — dark palette (overrides CLI-injected light defaults). */
+  --sidebar: var(--color-background);
+  --sidebar-foreground: var(--color-foreground);
+  --sidebar-primary: var(--color-volume);
+  --sidebar-primary-foreground: var(--color-background);
+  --sidebar-accent: var(--color-card-elevated);
+  --sidebar-accent-foreground: var(--color-foreground);
+  --sidebar-border: var(--color-border);
+  --sidebar-ring: var(--color-border-strong);
 }
 
 body {
@@ -237,3 +271,47 @@ html[data-session-filter="all"] [data-empty-when="active"] {
 ::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 0.04); border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 0.08); }
 * { scrollbar-width: thin; scrollbar-color: oklch(1 0 0 / 0.04) transparent; }
+
+.dark {
+  /* Reserved for explicit-dark scoping — our app is always-dark via :root.
+     Kept as a no-op fallback in case a consumer toggles `.dark` manually. */
+}
+
+@theme inline {
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-muted: var(--muted);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-card-foreground: var(--card-foreground);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-sidebar:
+    var(--sidebar);
+  --color-sidebar-foreground:
+    var(--sidebar-foreground);
+  --color-sidebar-primary:
+    var(--sidebar-primary);
+  --color-sidebar-primary-foreground:
+    var(--sidebar-primary-foreground);
+  --color-sidebar-accent:
+    var(--sidebar-accent);
+  --color-sidebar-accent-foreground:
+    var(--sidebar-accent-foreground);
+  --color-sidebar-border:
+    var(--sidebar-border);
+  --color-sidebar-ring:
+    var(--sidebar-ring);
+}
