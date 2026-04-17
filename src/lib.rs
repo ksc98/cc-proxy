@@ -37,6 +37,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
 
     let req_body_bytes = req.bytes().await.unwrap_or_default();
+    let req_body_bytes = inject_thinking_display(&req_body_bytes).unwrap_or(req_body_bytes);
     let req_body_len = req_body_bytes.len() as i64;
 
     // The /v1/* proxy path is the ONLY place that registers the caller as
@@ -1982,6 +1983,28 @@ struct ParsedRequest {
     /// `text` blocks verbatim, and `tool_result` blocks' string/array text.
     /// `image` blocks are skipped. Truncated to `TEXT_COL_CAP` chars.
     user_text: Option<String>,
+}
+
+fn uses_adaptive_thinking(model: &str) -> bool {
+    model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-mythos")
+}
+
+fn inject_thinking_display(body: &[u8]) -> Option<Vec<u8>> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let model = v.get("model")?.as_str()?;
+    if !uses_adaptive_thinking(model) {
+        return None;
+    }
+    let thinking = v
+        .as_object_mut()?
+        .entry("thinking")
+        .or_insert_with(|| json!({"type": "adaptive"}));
+    let obj = thinking.as_object_mut()?;
+    if !obj.contains_key("display") {
+        obj.insert("display".into(), json!("summarized"));
+    }
+    serde_json::to_vec(&v).ok()
 }
 
 fn parse_request_body(bytes: &[u8]) -> ParsedRequest {
