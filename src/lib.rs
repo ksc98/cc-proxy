@@ -806,6 +806,10 @@ impl UserStore {
         // First-time backfill: if the table is brand new, seed it from the
         // existing transactions. O(turns) one-off; all subsequent writes
         // maintain it incrementally.
+        // Skip rows with model IS NULL — these are auxiliary requests
+        // (count_tokens, etc.) that carry no tokens and are filtered out
+        // of the turn list. Counting them inflates the session's "turns"
+        // header vs. what's actually rendered.
         if summary_is_new {
             let _ = sql.exec(
                 "INSERT INTO session_summaries
@@ -818,11 +822,19 @@ impl UserStore {
                         COALESCE(SUM(cache_read), 0),
                         COALESCE(SUM(cache_creation), 0)
                  FROM transactions
-                 WHERE session_id IS NOT NULL
+                 WHERE session_id IS NOT NULL AND model IS NOT NULL
                  GROUP BY session_id, model",
                 None,
             );
         }
+        // Self-heal: earlier versions of refresh_session_summary included
+        // model-NULL aux rows, leaving phantom "1 turn / No turns loaded"
+        // entries in the dashboard. Cheap one-shot sweep on every init
+        // keeps the table consistent with the new filter.
+        let _ = sql.exec(
+            "DELETE FROM session_summaries WHERE model IS NULL",
+            None,
+        );
         // One-time cleanup: mark any legacy in-flight placeholders as errors.
         // With the WebSocket refactor, in-flight state is client-side only —
         // no more placeholder rows. This sweep handles pre-refactor orphans.
@@ -1088,7 +1100,7 @@ impl UserStore {
                     COALESCE(SUM(cache_read), 0),
                     COALESCE(SUM(cache_creation), 0)
              FROM transactions
-             WHERE session_id = ?
+             WHERE session_id = ? AND model IS NOT NULL
              GROUP BY session_id, model",
             Some(vec![session_id.into()]),
         )?;
