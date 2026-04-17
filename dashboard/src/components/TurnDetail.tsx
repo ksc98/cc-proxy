@@ -262,7 +262,7 @@ function ConversationBlock({
             "text-[0.6875rem] uppercase tracking-[0.08em] font-mono",
             role === "you"
               ? "text-sky-400/80"
-              : "text-[var(--color-muted-foreground)]",
+              : "text-amber-400/80",
           )}
         >
           {role}{" "}
