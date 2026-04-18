@@ -344,7 +344,9 @@ export default function TokenAreaChart({
             strokeWidth={1.25}
             fill={`url(#${instanceId}-cacheRead)`}
             name="cache_read"
-            isAnimationActive={false}
+            isAnimationActive={true}
+            animationDuration={300}
+            animationEasing="ease-out"
           />
           <Area
             yAxisId="tokens"
@@ -354,7 +356,9 @@ export default function TokenAreaChart({
             strokeWidth={1.25}
             fill={`url(#${instanceId}-cacheCreation)`}
             name="cache_creation"
-            isAnimationActive={false}
+            isAnimationActive={true}
+            animationDuration={300}
+            animationEasing="ease-out"
           />
           <Area
             yAxisId="tokens"
@@ -364,7 +368,9 @@ export default function TokenAreaChart({
             strokeWidth={1.25}
             fill={`url(#${instanceId}-output)`}
             name="output"
-            isAnimationActive={false}
+            isAnimationActive={true}
+            animationDuration={300}
+            animationEasing="ease-out"
           />
           <Area
             yAxisId="tokens"
@@ -374,7 +380,9 @@ export default function TokenAreaChart({
             strokeWidth={1.25}
             fill={`url(#${instanceId}-input)`}
             name="input"
-            isAnimationActive={false}
+            isAnimationActive={true}
+            animationDuration={300}
+            animationEasing="ease-out"
           />
           <Line
             yAxisId="cost"
@@ -384,7 +392,9 @@ export default function TokenAreaChart({
             strokeWidth={1.75}
             dot={showCostDots ? { r: 2, fill: "var(--color-money)" } : false}
             name="cost"
-            isAnimationActive={false}
+            isAnimationActive={true}
+            animationDuration={300}
+            animationEasing="ease-out"
           />
           {showBrush && (
             <Brush
