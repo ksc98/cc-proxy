@@ -1,4 +1,5 @@
 import * as React from "react";
+import { lazy, Suspense } from "react";
 import {
   DEFAULT_WINDOW,
   UNIT_MAX,
@@ -11,6 +12,11 @@ import {
   type Window,
 } from "@/lib/pillWindow";
 import { cn } from "@/lib/cn";
+
+// NumberFlow registers web-component globals on module evaluation and
+// references DOM APIs missing in Cloudflare Workers SSR. Lazy-load so the
+// module is only fetched client-side.
+const NumberFlowLazy = lazy(() => import("@number-flow/react"));
 
 // Sensible starting pick when the user scrolls on an inactive unit.
 const UNIT_DEFAULT: Record<Unit, number> = { m: 15, h: 3, d: 1 };
@@ -114,7 +120,6 @@ function UnitSegment({
   // both "what's set" and "what would be picked on click".
   const showValue = preview !== null || active;
   const valueToShow = preview ?? activeValue;
-  const label = showValue ? `${valueToShow}${unit}` : unit;
   const isHighlighted = active || preview !== null;
 
   return (
@@ -132,7 +137,16 @@ function UnitSegment({
           : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
       )}
     >
-      {label}
+      {showValue ? (
+        <span className="inline-flex items-baseline">
+          <Suspense fallback={<span>{valueToShow}</span>}>
+            <NumberFlowLazy value={valueToShow} />
+          </Suspense>
+          {unit}
+        </span>
+      ) : (
+        unit
+      )}
     </button>
   );
 }
