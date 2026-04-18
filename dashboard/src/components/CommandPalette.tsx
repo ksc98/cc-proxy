@@ -24,6 +24,11 @@ type Mode = "hybrid" | "fts" | "vector";
 type Hit = {
   tx_id: string;
   ts: number;
+  // Most-recent ts across all turns in this session, from session_summaries
+  // on the backend. Prefer over `ts` for display so matches in still-active
+  // sessions appear recent. Omitted by the server for orphan rows without a
+  // matching session_summaries entry.
+  session_last_ts?: number;
   session_id: string | null;
   model: string | null;
   user_snip: string | null;
@@ -299,7 +304,7 @@ function HitItem({
         ) : null}
         <span className="text-[var(--color-subtle-foreground)]">·</span>
         <span className="text-[var(--color-subtle-foreground)]">
-          {fmtAgo(hit.ts)}
+          {fmtAgo(hit.session_last_ts ?? hit.ts)}
         </span>
         <span className="ml-auto font-mono tabular-nums text-[var(--color-subtle-foreground)]">
           {hit.score.toFixed(3)}

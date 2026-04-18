@@ -1243,13 +1243,19 @@ impl UserStore {
     // a short window around the match with <mark> highlights; `bm25()` scores
     // lower-is-better. Returned rows include the negated bm25 as `score` so
     // higher-is-better sorting works alongside Vectorize cosine scores.
+    //
+    // Includes a correlated subquery for the session's most-recent turn
+    // timestamp — the UI shows this instead of the per-turn ts so matches in
+    // still-active sessions display as recent.
     fn fts_search_rows(&self, q: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
         let sql = self.state.storage().sql();
         let cursor = sql.exec(
             "SELECT t.tx_id, t.ts, t.session_id, t.model,
                     snippet(transactions_fts, 0, '<mark>', '</mark>', '…', 10) AS user_snip,
                     snippet(transactions_fts, 1, '<mark>', '</mark>', '…', 10) AS asst_snip,
-                    -bm25(transactions_fts) AS score
+                    -bm25(transactions_fts) AS score,
+                    (SELECT MAX(s.last_ts) FROM session_summaries s
+                     WHERE s.session_id = t.session_id) AS session_last_ts
              FROM transactions_fts
              JOIN transactions t ON t.rowid = transactions_fts.rowid
              WHERE transactions_fts MATCH ?
@@ -1260,9 +1266,11 @@ impl UserStore {
         Ok(cursor.to_array().unwrap_or_default())
     }
 
-    // Hydrate a set of tx_ids (from Vectorize) into rows with plain-substring
-    // snippets. No MATCH means no `snippet()` highlights — callers that want
-    // highlights should use fts_search_rows.
+    // Hydrate a set of tx_ids (from Vectorize) into rows with raw text
+    // prefixes. Window size (2000 chars) is sized so the Rust-side
+    // `window_snippet` helper can find a query-token match within a
+    // realistic portion of the turn. The final displayed snippet is capped
+    // to ~220 chars in post-processing.
     fn hydrate_rows(&self, tx_ids: &[String]) -> Result<Vec<serde_json::Value>> {
         if tx_ids.is_empty() {
             return Ok(Vec::new());
@@ -1270,10 +1278,12 @@ impl UserStore {
         let ids: Vec<String> = tx_ids.iter().take(200).cloned().collect();
         let placeholders = vec!["?"; ids.len()].join(",");
         let query = format!(
-            "SELECT tx_id, ts, session_id, model,
-                    substr(COALESCE(user_text, ''), 1, 200) AS user_snip,
-                    substr(COALESCE(assistant_text, ''), 1, 200) AS asst_snip
-             FROM transactions WHERE tx_id IN ({})",
+            "SELECT t.tx_id, t.ts, t.session_id, t.model,
+                    substr(COALESCE(t.user_text, ''), 1, 2000) AS user_snip,
+                    substr(COALESCE(t.assistant_text, ''), 1, 2000) AS asst_snip,
+                    (SELECT MAX(s.last_ts) FROM session_summaries s
+                     WHERE s.session_id = t.session_id) AS session_last_ts
+             FROM transactions t WHERE t.tx_id IN ({})",
             placeholders
         );
         let params: Vec<SqlStorageValue> = ids.into_iter().map(SqlStorageValue::from).collect();
@@ -1342,38 +1352,77 @@ impl UserStore {
             Ok(b) => b,
             Err(_) => return Response::error("invalid body", 400),
         };
-        if b.q.trim().is_empty() {
+        let q_raw = b.q.trim().to_string();
+        if q_raw.is_empty() {
             return Response::error("missing q", 400);
         }
-        let mode = b.mode.as_deref().unwrap_or("hybrid");
+        let mode = b.mode.as_deref().unwrap_or("hybrid").to_string();
         let limit = b.limit.unwrap_or(20).clamp(1, 100);
 
         if let Err(resp) = self.check_search_rate_limit() {
             return resp;
         }
 
-        match mode {
+        // Server-side <2-char guard — client enforces this too, but don't
+        // trust the client to always do it. bm25 on a single char is noise.
+        if q_raw.chars().count() < 2 {
+            let empty: Vec<SearchHit> = Vec::new();
+            return Response::from_json(&json!({ "mode": mode, "results": empty }));
+        }
+
+        // Sanitize for FTS5: quote-wrap each whitespace-split token so
+        // FTS5's MATCH parser doesn't interpret `-`, `AND`, `:`, etc. as
+        // operators. `future-me` → `"future-me"` (phrase query over the
+        // tokenized form `future me`, adjacent). `session_id` → `"session_id"`
+        // (phrase over `session id`, adjacent). Queries like `a NOT b` become
+        // `"a" "NOT" "b"` — three AND'd literal tokens.
+        let fts_q = sanitize_fts_query(&q_raw);
+        // Raw tokens (no quotes) for Rust-side snippet windowing on vector
+        // hits — we want to find the user's literal query terms in the text.
+        let tokens = query_tokens(&q_raw);
+
+        match mode.as_str() {
             "fts" => {
-                let rows = self
-                    .fts_search_rows(&b.q, limit)
-                    .unwrap_or_default();
+                let rows = if fts_q.is_empty() {
+                    Vec::new()
+                } else {
+                    self.fts_search_rows(&fts_q, limit).unwrap_or_default()
+                };
                 let hits = hits_from_rows(rows, "fts");
                 Response::from_json(&json!({ "mode": "fts", "results": hits }))
             }
             "vector" => {
+                // mode=vector is an explicit user choice — no cosine floor
+                // applied, the caller accepts whatever the embedder returns.
                 let hits = self
-                    .vector_search(&b.q, limit, b.user_hash.as_deref())
+                    .vector_search(&q_raw, &tokens, limit, b.user_hash.as_deref())
                     .await
                     .unwrap_or_default();
                 Response::from_json(&json!({ "mode": "vector", "results": hits }))
             }
             _ => {
-                let fts_rows = self.fts_search_rows(&b.q, limit).unwrap_or_default();
+                let fts_rows = if fts_q.is_empty() {
+                    Vec::new()
+                } else {
+                    self.fts_search_rows(&fts_q, limit).unwrap_or_default()
+                };
                 let fts_hits = hits_from_rows(fts_rows, "fts");
-                let vec_hits = self
-                    .vector_search(&b.q, limit, b.user_hash.as_deref())
+                let vec_hits_raw = self
+                    .vector_search(&q_raw, &tokens, limit, b.user_hash.as_deref())
                     .await
                     .unwrap_or_default();
+                // Cosine floor on vector hits. Below 0.65 is noise for this
+                // embedder — gibberish queries top out around 0.61, real
+                // semantic matches sit 0.68+. Apply regardless of whether
+                // FTS returned hits: if a vector hit is noise, it shouldn't
+                // contribute to RRF just because FTS also found something
+                // (otherwise a spurious vector rank-1 ties with the real
+                // FTS rank-1 at `1/61`, and the UI can show the noise
+                // first). Revisit once we have query logs.
+                let vec_hits: Vec<SearchHit> = vec_hits_raw
+                    .into_iter()
+                    .filter(|h| h.score >= 0.65)
+                    .collect();
                 let merged = reciprocal_rank_fusion(fts_hits, vec_hits, limit as usize);
                 Response::from_json(&json!({ "mode": "hybrid", "results": merged }))
             }
@@ -1385,9 +1434,16 @@ impl UserStore {
     // an empty vec (never an error) when user_hash is missing — semantic
     // search simply isn't available in that case, which is a
     // degraded-but-functional state (FTS still works).
+    //
+    // `tokens` is the raw-query token list used for snippet windowing —
+    // vector hits have no FTS match positions, so we find the first query
+    // token lexically and emit a ±window-of-chars snippet with <mark>s
+    // matching the FTS visual style. Falls back to the head prefix when no
+    // token appears (true semantic-only match).
     async fn vector_search(
         &self,
         q: &str,
+        tokens: &[String],
         limit: i64,
         user_hash: Option<&str>,
     ) -> std::result::Result<Vec<SearchHit>, String> {
@@ -1406,6 +1462,13 @@ impl UserStore {
         for h in &mut hits {
             if let Some(&s) = score_by_id.get(&h.tx_id) {
                 h.score = s;
+            }
+            // Replace the 2000-char raw prefix with a windowed snippet.
+            if let Some(user) = h.user_snip.as_deref() {
+                h.user_snip = Some(window_snippet(user, tokens, SNIPPET_CHARS));
+            }
+            if let Some(asst) = h.asst_snip.as_deref() {
+                h.asst_snip = Some(window_snippet(asst, tokens, SNIPPET_CHARS));
             }
         }
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -2610,10 +2673,122 @@ async fn vectorize_query(
 
 // ---------- /_cm/search ----------
 
+/// Max chars rendered in a search result snippet. Also sets the padding budget
+/// for the windowing helper.
+const SNIPPET_CHARS: usize = 220;
+
+/// Wrap each whitespace-split token from the user's query in double quotes so
+/// FTS5's MATCH parser treats them as literal phrases instead of operators.
+///
+/// Rationale: FTS5 parses `-`/`AND`/`OR`/`NOT`/`:`/`^` as operators in the
+/// unquoted grammar. `future-me` becomes `future NOT me`, which returns
+/// nothing because "me" is in nearly every turn. `session_id` mostly works
+/// (implicit AND of `session` and `id` after tokenization) but can interact
+/// badly with adjacent operator chars. Quoting each token forces phrase-query
+/// semantics, which pass through the tokenizer normally but skip operator
+/// parsing. Internal embedded `"` chars are replaced with spaces before
+/// wrapping, so we can't produce malformed MATCH syntax.
+fn sanitize_fts_query(q: &str) -> String {
+    query_tokens(q)
+        .into_iter()
+        .map(|tok| format!("\"{}\"", tok))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Split the query on whitespace, strip embedded `"` (would break our own
+/// quoting), drop any tokens shorter than 2 chars (FTS5 signal-to-noise and
+/// windowing stability). Returns the raw token list; `sanitize_fts_query`
+/// wraps these for MATCH, `vector_search` uses them for snippet windowing.
+fn query_tokens(q: &str) -> Vec<String> {
+    q.split_whitespace()
+        .flat_map(|tok| {
+            tok.replace('"', " ")
+                .split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .filter(|tok| tok.chars().count() >= 2)
+        .collect()
+}
+
+/// Produce a ~`total_chars`-char snippet centered on the first occurrence of
+/// any query token in `text`. Uses `<mark>`/`</mark>` around the matched
+/// span to match the visual style of FTS5's `snippet()` output. Falls back
+/// to a head prefix (no `<mark>`) when no token is lexically present — this
+/// is the true-semantic-match case.
+///
+/// ASCII-case-insensitive only: `to_ascii_lowercase` preserves byte offsets
+/// so the byte position from `find()` is valid in the original text. For
+/// non-ASCII content the match is case-sensitive — acceptable for this use.
+fn window_snippet(text: &str, tokens: &[String], total_chars: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let text_lower = text.to_ascii_lowercase();
+    for token in tokens {
+        let tok_lower = token.to_ascii_lowercase();
+        if let Some(byte_pos) = text_lower.find(&tok_lower) {
+            return make_window(text, byte_pos, tok_lower.len(), total_chars);
+        }
+    }
+    head_snippet(text, total_chars)
+}
+
+/// Build the windowed output around a byte-offset match. Walks char_indices
+/// to stay on UTF-8 boundaries and counts characters (not bytes) toward the
+/// budget, so multi-byte content doesn't blow up the rendered length.
+fn make_window(text: &str, match_byte_pos: usize, match_byte_len: usize, total_chars: usize) -> String {
+    let match_byte_end = match_byte_pos + match_byte_len;
+    // Map byte offsets to char indices.
+    let char_start = text[..match_byte_pos].chars().count();
+    let char_end = text[..match_byte_end].chars().count();
+    let match_chars = char_end - char_start;
+    let text_chars: Vec<char> = text.chars().collect();
+    let total = text_chars.len();
+    if match_chars >= total_chars {
+        return head_snippet(text, total_chars);
+    }
+    let pad = (total_chars - match_chars) / 2;
+    let window_start = char_start.saturating_sub(pad);
+    let window_end = (char_end + pad).min(total);
+    let mut out = String::new();
+    if window_start > 0 {
+        out.push('…');
+    }
+    out.extend(text_chars[window_start..char_start].iter());
+    out.push_str("<mark>");
+    out.extend(text_chars[char_start..char_end].iter());
+    out.push_str("</mark>");
+    out.extend(text_chars[char_end..window_end].iter());
+    if window_end < total {
+        out.push('…');
+    }
+    out
+}
+
+/// Fallback snippet: first `n` chars of `text`, with an ellipsis if truncated.
+fn head_snippet(text: &str, n: usize) -> String {
+    let total = text.chars().count();
+    if total <= n {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct SearchHit {
     tx_id: String,
     ts: i64,
+    // Most-recent ts across all turns in this session, from session_summaries.
+    // The UI prefers this over `ts` so a match in a still-active session
+    // displays as recent. Falls back to `ts` on the frontend when None
+    // (orphan rows without a session_summaries entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_last_ts: Option<i64>,
     session_id: Option<String>,
     model: Option<String>,
     user_snip: Option<String>,
@@ -2737,6 +2912,7 @@ fn hits_from_rows(rows: Vec<serde_json::Value>, source: &str) -> Vec<SearchHit> 
                 .unwrap_or_default()
                 .to_string(),
             ts: row.get("ts").and_then(|x| x.as_i64()).unwrap_or_default(),
+            session_last_ts: row.get("session_last_ts").and_then(|x| x.as_i64()),
             session_id: row
                 .get("session_id")
                 .and_then(|x| x.as_str())
