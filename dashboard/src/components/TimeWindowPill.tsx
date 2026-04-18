@@ -157,6 +157,11 @@ function UnitScrubber({
     [max],
   );
 
+  const pad = ROWS_VISIBLE * ITEM_H / 2 - ITEM_H / 2;
+  const emptyTop = Math.max(0, pad - (value - 1) * ITEM_H);
+  const emptyBottom = Math.max(0, pad - (max - value) * ITEM_H);
+  const cardHeight = ROWS_VISIBLE * ITEM_H - emptyTop - emptyBottom;
+
   // Initial centering — runs once when the popover mounts.
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -191,47 +196,53 @@ function UnitScrubber({
     commitTimer.current = window.setTimeout(() => onCommit(next), 350);
   };
 
-  const pad = ROWS_VISIBLE * ITEM_H / 2 - ITEM_H / 2;
-
   return (
     <div
-      className="absolute left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2"
+      className="absolute left-1/2 z-50 -translate-x-1/2"
+      style={{
+        top: `calc(50% - ${pad + ITEM_H / 2 - emptyTop}px)`,
+      }}
       role="presentation"
     >
-      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg">
-        <div className="relative">
-          <div
-            className="pointer-events-none absolute inset-x-1 top-1/2 -translate-y-1/2 rounded-md border border-[var(--color-border-strong)] bg-[var(--color-volume-muted)]"
-            style={{ height: ITEM_H }}
-            aria-hidden="true"
-          />
-          <div
-            ref={scrollRef}
-            onScroll={handleScroll}
-            className="relative w-16 snap-y snap-mandatory overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            style={{
-              height: ROWS_VISIBLE * ITEM_H,
-              paddingTop: pad,
-              paddingBottom: pad,
-            }}
-          >
-            {values.map((n) => (
-              <button
-                key={n}
-                type="button"
-                onClick={() => onCommit(n)}
-                className={cn(
-                  "flex w-full snap-center items-center justify-center text-xs tabular-nums transition-colors",
-                  n === value
-                    ? "font-medium text-[var(--color-foreground)]"
-                    : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
-                )}
-                style={{ height: ITEM_H }}
-              >
-                {n}
-                {unit}
-              </button>
-            ))}
+      <div
+        className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg"
+        style={{ height: cardHeight }}
+      >
+        <div style={{ marginTop: -emptyTop }}>
+          <div className="relative" style={{ height: ROWS_VISIBLE * ITEM_H }}>
+            <div
+              className="pointer-events-none absolute inset-x-1 top-1/2 -translate-y-1/2 rounded-md border border-[var(--color-border-strong)] bg-[var(--color-volume-muted)]"
+              style={{ height: ITEM_H }}
+              aria-hidden="true"
+            />
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              className="relative w-16 snap-y snap-mandatory overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              style={{
+                height: ROWS_VISIBLE * ITEM_H,
+                paddingTop: pad,
+                paddingBottom: pad,
+              }}
+            >
+              {values.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => onCommit(n)}
+                  className={cn(
+                    "flex w-full snap-center items-center justify-center text-xs tabular-nums transition-colors",
+                    n === value
+                      ? "font-medium text-[var(--color-foreground)]"
+                      : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
+                  )}
+                  style={{ height: ITEM_H }}
+                >
+                  {n}
+                  {unit}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
