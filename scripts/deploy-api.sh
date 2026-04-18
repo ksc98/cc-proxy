@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Expand __PROXY_ROUTES__ in wrangler.toml into one `{pattern, zone_name}`
-# pair per domain in $DOMAINS (space-separated; first = primary), then
-# deploy the API worker from the generated file. The generated file is
-# dropped on exit so the tree stays clean.
+# Deploy the API worker with routes supplied at the CLI from $DOMAINS
+# (space-separated list, first = primary). Routes live outside wrangler.toml
+# so the committed config is valid TOML everywhere — including CF Workers
+# Builds' preview-version uploads on feature branches.
 #
 # Callers:
 #   - `just deploy-api` (local dev)
-#   - Cloudflare Workers Builds (CI). Dashboard build command should be:
+#   - Cloudflare Workers Builds (CI). Dashboard Deploy command:
 #       . "$HOME/.cargo/env" && ./scripts/deploy-api.sh
 #     with DOMAINS set as a plain-text variable on the Worker.
 
@@ -16,15 +16,9 @@ cd "$(dirname "$0")/.."
 
 : "${DOMAINS:?set DOMAINS (space-separated list, first = primary)}"
 
-routes=""
+route_args=()
 for d in $DOMAINS; do
-    routes+="  { pattern = \"${d}/v1/*\", zone_name = \"${d}\" },"$'\n'
-    routes+="  { pattern = \"${d}/_cm/*\", zone_name = \"${d}\" },"$'\n'
+    route_args+=(--route "$d/v1/*" --route "$d/_cm/*")
 done
-routes="${routes%$'\n'}"
 
-awk -v r="$routes" '$0 == "__PROXY_ROUTES__" { print r; next } { print }' \
-    wrangler.toml > wrangler.deploy.toml
-trap 'rm -f wrangler.deploy.toml' EXIT
-
-npx --yes wrangler@latest deploy -c wrangler.deploy.toml
+npx --yes wrangler@latest deploy "${route_args[@]}"

@@ -4,13 +4,6 @@ compatibility_date = "2025-01-01"
 workers_dev = false
 preview_urls = false
 
-# __PROXY_ROUTES__ is expanded at deploy time from $DOMAINS (space-separated,
-# see justfile) so the public repo stays deployment-agnostic. The proxy takes
-# /v1/* and /_cm/*; the dashboard worker binds the rest of each hostname.
-routes = [
-__PROXY_ROUTES__
-]
-
 # One Durable Object instance per user_hash. Each instance gets its own
 # private SQLite database (via `state.storage().sql()`). No provisioning —
 # the first request with a given name materializes the DO + its DB.
