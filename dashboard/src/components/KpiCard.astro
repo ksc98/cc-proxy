@@ -1,5 +1,5 @@
 ---
-import Sparkline from "./Sparkline.astro";
+import Sparkline from "./Sparkline";
 import KpiValue, { type KpiValueKind } from "./KpiValue";
 import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 
@@ -96,7 +96,7 @@ const CardTag = href ? "a" : "div";
   {hasSpark && (
     <div
       aria-hidden="true"
-      class="pointer-events-none absolute inset-x-0 bottom-0 opacity-35"
+      class="pointer-events-none absolute inset-x-0 bottom-0 opacity-25"
       style="height: 68%;"
     >
       <Sparkline

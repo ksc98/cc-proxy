@@ -21,6 +21,15 @@ export function publishRows(rows: TransactionRow[]): void {
   });
 }
 
+/** Seed the cache from SSR data without notifying existing subscribers.
+ * Lets a page-level island prime the bus with its initialRows so that the
+ * next WS turn_complete merges against a complete baseline instead of
+ * starting from []. No-op if the bus already has data. */
+export function seedRows(rows: TransactionRow[]): void {
+  if (latest) return;
+  latest = rows;
+}
+
 export function subscribeRows(fn: Listener): () => void {
   listeners.add(fn);
   if (latest) fn(latest);

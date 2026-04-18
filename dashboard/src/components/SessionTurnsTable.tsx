@@ -28,7 +28,7 @@ import {
 import type { TransactionRow } from "@/lib/store";
 import { shortToolName } from "@/lib/tools";
 import { cn } from "@/lib/cn";
-import { subscribeRows } from "@/lib/rowsBus";
+import { subscribeRows, seedRows } from "@/lib/rowsBus";
 import { TurnDetail } from "@/components/TurnDetail";
 import {
   CacheReadCell,
@@ -202,7 +202,10 @@ export default function SessionTurnsTable({
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
   const [highlightTxId, setHighlightTxId] = React.useState<string | null>(null);
 
-  React.useEffect(() => subscribeRows(setRows), []);
+  React.useEffect(() => {
+    seedRows(initialRows);
+    return subscribeRows(setRows);
+  }, [initialRows]);
 
   const data = React.useMemo(
     () => toTurns(rows, sessionId),
