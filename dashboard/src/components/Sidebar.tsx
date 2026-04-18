@@ -137,14 +137,12 @@ export function Sidebar({
         >
           <a
             href="/"
-            className="flex items-center gap-2 min-w-0"
-            title="llmetry"
+            className="burnage-brand"
+            title="Burnage"
           >
-            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[var(--color-money)] shrink-0" />
+            <span className="burnage-brain" aria-hidden="true" />
             {!collapsed && (
-              <span className="text-[0.95rem] font-semibold tracking-tight truncate">
-                llmetry
-              </span>
+              <span className="burnage-text">Burnage</span>
             )}
           </a>
           {!collapsed && (
@@ -263,9 +261,9 @@ export function Sidebar({
           className="w-72 p-0 bg-[var(--color-background)] border-[var(--color-border)] flex flex-col"
         >
           <SheetHeader className="h-14 px-4 flex-row items-center justify-between border-b border-[var(--color-border)] space-y-0">
-            <SheetTitle className="flex items-center gap-2 text-[0.95rem] font-semibold tracking-tight">
-              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-[var(--color-money)]" />
-              llmetry
+            <SheetTitle className="burnage-brand text-[0.95rem]">
+              <span className="burnage-brain" aria-hidden="true" />
+              <span className="burnage-text">Burnage</span>
             </SheetTitle>
           </SheetHeader>
           <div className="p-2 flex flex-col gap-1">

@@ -272,6 +272,91 @@ html[data-session-filter="all"] [data-empty-when="active"] {
 ::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 0.08); }
 * { scrollbar-width: thin; scrollbar-color: oklch(1 0 0 / 0.04) transparent; }
 
+/* Burnage brand — brain-on-fire logo + flame-on-hover wordmark. */
+.burnage-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  position: relative;
+  text-decoration: none;
+}
+.burnage-brain {
+  display: inline-block;
+  width: 1.25em;
+  height: 1.25em;
+  flex-shrink: 0;
+  background:
+    linear-gradient(
+      0deg,
+      #b91c1c 0%,
+      #dc2626 18%,
+      #f97316 42%,
+      #fbbf24 68%,
+      #fde68a 90%,
+      #fef9c3 100%
+    );
+  -webkit-mask: url('/brain-logo.png') center / contain no-repeat;
+  mask: url('/brain-logo.png') center / contain no-repeat;
+  filter:
+    drop-shadow(0 0 3px rgba(251, 146, 60, 0.55))
+    drop-shadow(0 -2px 6px rgba(220, 38, 38, 0.35));
+  animation: burnage-flicker 1.4s ease-in-out infinite;
+}
+.burnage-text {
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.015em;
+  color: var(--color-foreground);
+  transition: color 0.25s ease, filter 0.25s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.burnage-brand:hover .burnage-text {
+  background: linear-gradient(
+    0deg,
+    #dc2626 0%,
+    #f97316 35%,
+    #fbbf24 70%,
+    #fef9c3 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 3px rgba(251, 146, 60, 0.55));
+  animation: burnage-flicker 1.4s ease-in-out infinite;
+}
+@keyframes burnage-flicker {
+  0%, 100% {
+    filter:
+      drop-shadow(0 0 3px rgba(251, 146, 60, 0.55))
+      drop-shadow(0 -2px 6px rgba(220, 38, 38, 0.35));
+  }
+  25% {
+    filter:
+      drop-shadow(0 0 5px rgba(254, 240, 138, 0.7))
+      drop-shadow(0 -3px 9px rgba(249, 115, 22, 0.5));
+  }
+  50% {
+    filter:
+      drop-shadow(0 0 3px rgba(251, 146, 60, 0.5))
+      drop-shadow(0 -2px 7px rgba(220, 38, 38, 0.4));
+  }
+  75% {
+    filter:
+      drop-shadow(0 0 4px rgba(253, 186, 116, 0.8))
+      drop-shadow(0 -4px 10px rgba(249, 115, 22, 0.55));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .burnage-brain,
+  .burnage-brand:hover .burnage-text {
+    animation: none;
+  }
+}
+
 .dark {
   /* Reserved for explicit-dark scoping — our app is always-dark via :root.
      Kept as a no-op fallback in case a consumer toggles `.dark` manually. */
