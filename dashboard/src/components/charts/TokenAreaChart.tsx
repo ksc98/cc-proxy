@@ -23,7 +23,9 @@ export type TokenAreaPoint = {
   output: number | null;
   cache_read: number | null;
   cache_creation: number | null;
-  cost: number;
+  // Cost is also nullable so synthetic "time gap" rows can break every
+  // series at once instead of letting the cost line bridge across.
+  cost: number | null;
   // xKey is dynamic (either "ts" or "turn")
   [k: string]: number | null;
 };

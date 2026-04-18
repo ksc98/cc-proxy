@@ -13,6 +13,47 @@ import TokenAreaChart, { type TokenAreaPoint } from "./charts/TokenAreaChart";
 
 type Point = TokenAreaPoint & { ts: number };
 
+// Insert an explicit null point whenever consecutive turns are far enough
+// apart in time that the gap likely represents "the user wasn't using
+// Claude". Without this, the cache_read series — which is non-zero on
+// every turn — draws a continuous line across the gap, masking the time
+// of actual usage. Null breaks all series consistently.
+function withTimeGaps(points: Point[], bucketMs: number): Point[] {
+  if (points.length < 2) return points;
+
+  let threshold: number;
+  if (bucketMs > 0) {
+    // Bucketed: any missing bucket is a gap.
+    threshold = bucketMs * 1.5;
+  } else {
+    // Per-turn: gap = much-bigger-than-typical inter-turn delta.
+    const deltas: number[] = [];
+    for (let i = 1; i < points.length; i++) {
+      deltas.push(points[i].ts - points[i - 1].ts);
+    }
+    deltas.sort((a, b) => a - b);
+    const median = deltas[Math.floor(deltas.length / 2)];
+    threshold = Math.max(60_000, median * 8);
+  }
+
+  const out: Point[] = [];
+  for (let i = 0; i < points.length; i++) {
+    out.push(points[i]);
+    const next = points[i + 1];
+    if (next && next.ts - points[i].ts > threshold) {
+      out.push({
+        ts: points[i].ts + (next.ts - points[i].ts) / 2,
+        input: null,
+        output: null,
+        cache_read: null,
+        cache_creation: null,
+        cost: null,
+      });
+    }
+  }
+  return out;
+}
+
 // Bucket sizes per window. Tokens are averaged per turn; cost is summed.
 // Only long windows (> 24h) bucket — shorter windows render individual turns.
 function bucketMsFor(win: Window): number {
@@ -127,7 +168,10 @@ export default function TokenChart({
     [],
   );
 
-  const data = useMemo(() => rowsToPoints(rows, win), [rows, win]);
+  const data = useMemo(
+    () => withTimeGaps(rowsToPoints(rows, win), bucketMsFor(win)),
+    [rows, win],
+  );
 
   // Enable the brush on wide windows where point counts are high and
   // scrubbing becomes useful. Bucketed windows still produce hundreds of
