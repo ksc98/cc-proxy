@@ -28,22 +28,11 @@ login:
     npx --yes wrangler@latest login
 
 # Expand __PROXY_ROUTES__ in wrangler.toml into one {/v1/*, /_cm/*} pair
-# per domain in $DOMAINS (space-separated; first = primary). Deploys from
-# the generated file, then drops it. Keeps hostnames out of source.
+# per domain in $DOMAINS (space-separated; first = primary). The heavy
+# lifting lives in scripts/deploy-api.sh so Cloudflare Workers Builds
+# (CI) can reuse the exact same flow.
 deploy-api:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${DOMAINS:?set DOMAINS (space-separated list, first = primary) in .env}"
-    routes=""
-    for d in $DOMAINS; do
-        routes+="  { pattern = \"${d}/v1/*\", zone_name = \"${d}\" },"$'\n'
-        routes+="  { pattern = \"${d}/_cm/*\", zone_name = \"${d}\" },"$'\n'
-    done
-    routes="${routes%$'\n'}"
-    awk -v r="$routes" '$0 == "__PROXY_ROUTES__" { print r; next } { print }' \
-        wrangler.toml > wrangler.deploy.toml
-    trap 'rm -f wrangler.deploy.toml' EXIT
-    npx --yes wrangler@latest deploy -c wrangler.deploy.toml
+    ./scripts/deploy-api.sh
 
 tail:
     npx --yes wrangler@latest tail --format pretty
