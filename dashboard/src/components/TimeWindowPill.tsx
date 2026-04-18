@@ -148,7 +148,6 @@ function UnitScrubber({
   onCommit: (n: number) => void;
 }) {
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
-  const commitTimer = React.useRef<number | undefined>(undefined);
   const suppressScrollRef = React.useRef(false);
 
   const max = UNIT_MAX[unit];
@@ -176,12 +175,6 @@ function UnitScrubber({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  React.useEffect(() => {
-    return () => {
-      if (commitTimer.current != null) window.clearTimeout(commitTimer.current);
-    };
-  }, []);
-
   const handleScroll = () => {
     if (suppressScrollRef.current) return;
     const el = scrollRef.current;
@@ -189,11 +182,6 @@ function UnitScrubber({
     const idx = Math.round(el.scrollTop / ITEM_H);
     const next = Math.min(Math.max(idx + 1, 1), max);
     if (next !== value) onPreview(next);
-
-    // "Live" commit: applies after the user stops scrolling briefly so we
-    // don't fire a reload on every wheel tick.
-    if (commitTimer.current != null) window.clearTimeout(commitTimer.current);
-    commitTimer.current = window.setTimeout(() => onCommit(next), 350);
   };
 
   return (
