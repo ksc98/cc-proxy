@@ -73,7 +73,17 @@ export const StopDot = React.memo(function StopDot({ tx }: TxProps) {
 });
 
 export const WhenCell = React.memo(function WhenCell({ tx }: TxProps) {
-  const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
+  // For in-flight turns, the elapsed "time since start" is the duration —
+  // it belongs in the Duration column, not When. Leave When blank until the
+  // turn completes and we have a real finish timestamp to render ago-from.
+  if (tx.in_flight === 1) {
+    return (
+      <span className="text-[var(--color-subtle-foreground)] font-mono text-xs tabular-nums whitespace-nowrap">
+        —
+      </span>
+    );
+  }
+  const finishedAt = tx.ts + tx.elapsed_ms;
   // Render the empty span on SSR + first hydration paint, then fill in
   // once the client has fully mounted. Base.astro's global 1s ticker
   // populates the text immediately after via the `data-ts` attribute,
@@ -91,9 +101,24 @@ export const WhenCell = React.memo(function WhenCell({ tx }: TxProps) {
 });
 
 export const DurationCell = React.memo(function DurationCell({ tx }: TxProps) {
+  // In-flight: live-counting elapsed since tx.ts. The Base.astro 1s ticker
+  // keeps [data-ts] elements updated via fmtAgo, which produces the same
+  // "12s / 1m3s / 2h" format we use for completed durations.
+  if (tx.in_flight === 1) {
+    const hydrated = useHydrated();
+    return (
+      <span
+        data-ts={tx.ts}
+        className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]"
+        suppressHydrationWarning
+      >
+        {hydrated ? fmtAgo(tx.ts) : ""}
+      </span>
+    );
+  }
   return (
     <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-      {tx.in_flight === 1 ? "—" : fmtDuration(tx.elapsed_ms)}
+      {fmtDuration(tx.elapsed_ms)}
     </span>
   );
 });

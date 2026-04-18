@@ -19,6 +19,14 @@ import {
   Loader2,
 } from "lucide-react";
 import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Table,
   TableBody,
   TableCell,
@@ -284,6 +292,22 @@ const columns: ColumnDef<UIRow>[] = [
 const HIDDEN_PER_GROUP = 5;
 const SHOW_MORE_CHUNK = 5;
 
+const SESSION_LIMIT_KEY = "burnage_session_limit";
+const SESSION_LIMIT_OPTIONS: ReadonlyArray<number | "all"> = [5, 10, 25, 50, "all"];
+const DEFAULT_SESSION_LIMIT: number | "all" = 10;
+
+function parseLimit(raw: string | null): number | "all" | null {
+  if (raw == null) return null;
+  if (raw === "all") return "all";
+  const n = Number(raw);
+  if (Number.isFinite(n) && SESSION_LIMIT_OPTIONS.includes(n)) return n;
+  return null;
+}
+
+function limitLabel(limit: number | "all"): string {
+  return limit === "all" ? "All" : String(limit);
+}
+
 function parentIdFor(leaf: LeafRow): string {
   return `g:${leaf.tx.session_id ?? "__unlinked__"}`;
 }
@@ -321,6 +345,25 @@ export default function RecentTurnsTable({
   );
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = React.useState("");
+  const [sessionLimit, setSessionLimit] = React.useState<number | "all">(
+    DEFAULT_SESSION_LIMIT,
+  );
+  React.useEffect(() => {
+    try {
+      const saved = parseLimit(localStorage.getItem(SESSION_LIMIT_KEY));
+      if (saved != null) setSessionLimit(saved);
+    } catch {
+      /* localStorage blocked */
+    }
+  }, []);
+  const updateSessionLimit = React.useCallback((next: number | "all") => {
+    setSessionLimit(next);
+    try {
+      localStorage.setItem(SESSION_LIMIT_KEY, String(next));
+    } catch {
+      /* localStorage blocked */
+    }
+  }, []);
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
     [],
   );
@@ -445,9 +488,19 @@ export default function RecentTurnsTable({
     [],
   );
 
+  // Summaries arrive active-first, newest-first. Clamp the count for the
+  // table but always include every active session, even if the chosen
+  // limit would otherwise cut some off.
+  const displayedSummaries = React.useMemo(() => {
+    if (sessionLimit === "all") return summaries;
+    const activeCount = summaries.filter((s) => s.active).length;
+    const take = Math.max(sessionLimit, activeCount);
+    return summaries.slice(0, take);
+  }, [summaries, sessionLimit]);
+
   const data = React.useMemo(
-    () => buildGroups(summaries, turnsBySession),
-    [summaries, turnsBySession],
+    () => buildGroups(displayedSummaries, turnsBySession),
+    [displayedSummaries, turnsBySession],
   );
 
   // Auto-expand newly active / resumed sessions and auto-collapse sessions
@@ -632,7 +685,11 @@ export default function RecentTurnsTable({
           <>
             <h2 className="text-sm font-medium">Recent turns</h2>
             <span className="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-              {leafCount} turns · {groupCount} sessions
+              {leafCount} turns ·{" "}
+              {groupCount < summaries.length
+                ? `${groupCount} of ${summaries.length}`
+                : groupCount}{" "}
+              sessions
             </span>
             {modelColors.size > 0 && (
               <>
@@ -684,14 +741,45 @@ export default function RecentTurnsTable({
           </>
         }
         trailing={
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs font-normal text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)]"
-            onClick={() => table.toggleAllRowsExpanded(!allExpanded)}
-          >
-            {allExpanded ? "Collapse all" : "Expand all"}
-          </Button>
+          <>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs font-normal text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)] data-[state=open]:bg-[var(--color-card-elevated)] data-[state=open]:text-foreground"
+                  aria-label="Session count"
+                >
+                  Show {limitLabel(sessionLimit)}
+                  <ChevronDown size={12} className="opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-36">
+                <DropdownMenuLabel className="text-xs">
+                  Sessions shown
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {SESSION_LIMIT_OPTIONS.map((opt) => (
+                  <DropdownMenuCheckboxItem
+                    key={String(opt)}
+                    checked={sessionLimit === opt}
+                    onCheckedChange={() => updateSessionLimit(opt)}
+                    className="text-xs"
+                  >
+                    {limitLabel(opt)}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs font-normal text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)]"
+              onClick={() => table.toggleAllRowsExpanded(!allExpanded)}
+            >
+              {allExpanded ? "Collapse all" : "Expand all"}
+            </Button>
+          </>
         }
       />
 
