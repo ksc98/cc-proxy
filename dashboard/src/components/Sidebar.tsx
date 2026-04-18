@@ -138,11 +138,11 @@ export function Sidebar({
           <a
             href="/"
             className="burnage-brand"
-            title="Burnage"
+            title="Burnage.dev"
           >
             <span className="burnage-brain" aria-hidden="true" />
             {!collapsed && (
-              <span className="burnage-text">Burnage</span>
+              <span className="burnage-text">Burnage.dev</span>
             )}
           </a>
           {!collapsed && (
@@ -263,7 +263,7 @@ export function Sidebar({
           <SheetHeader className="h-14 px-4 flex-row items-center justify-between border-b border-[var(--color-border)] space-y-0">
             <SheetTitle className="burnage-brand text-[0.95rem]">
               <span className="burnage-brain" aria-hidden="true" />
-              <span className="burnage-text">Burnage</span>
+              <span className="burnage-text">Burnage.dev</span>
             </SheetTitle>
           </SheetHeader>
           <div className="p-2 flex flex-col gap-1">
